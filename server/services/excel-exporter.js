@@ -1,439 +1,275 @@
 /**
- * Excel Export Service
- * Generates a styled .xlsx VQ summary workbook from versionData
+ * Excel Export Service — Template-Driven
+ * Loads VQ-template.xlsx and fills data from DB, preserving all TOMY formatting and formulas.
  */
 const ExcelJS = require('exceljs');
+const path = require('path');
 const { getDb } = require('./db');
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const TEMPLATE_PATH = path.join(__dirname, '../templates/VQ-template.xlsx');
 
-function n(v, d = 4) {
-  const num = parseFloat(v);
-  return isNaN(num) ? null : parseFloat(num.toFixed(d));
-}
+// ─── Load all version data from DB ───────────────────────────────────────────
 
-function pct(v) {
-  const num = parseFloat(v);
-  return isNaN(num) ? '—' : (num * 100).toFixed(1) + '%';
-}
-
-// Style helpers
-const STYLES = {
-  title:   { font: { bold: true, size: 14, color: { argb: 'FFFFFFFF' } }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1a3c6e' } }, alignment: { horizontal: 'center', vertical: 'middle' } },
-  section: { font: { bold: true, size: 11, color: { argb: 'FFFFFFFF' } }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2d6cb4' } }, alignment: { vertical: 'middle' } },
-  header:  { font: { bold: true, size: 10, color: { argb: 'FFFFFFFF' } }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4a7dbf' } }, alignment: { horizontal: 'center', vertical: 'middle', wrapText: true } },
-  label:   { font: { size: 10 }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFeef2fb' } }, alignment: { vertical: 'middle' } },
-  total:   { font: { bold: true, size: 10 }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFdce8f8' } }, alignment: { vertical: 'middle' } },
-  grand:   { font: { bold: true, size: 11, color: { argb: 'FF003366' } }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFfef9e7' } }, alignment: { vertical: 'middle' } },
-  num:     { alignment: { horizontal: 'right', vertical: 'middle' } },
-  plain:   { font: { size: 10 }, alignment: { vertical: 'middle' } },
-};
-
-function applyStyle(row, style) {
-  row.eachCell({ includeEmpty: true }, cell => {
-    if (style.font) Object.assign(cell.font || (cell.font = {}), style.font);
-    if (style.fill) cell.fill = style.fill;
-    if (style.alignment) cell.alignment = style.alignment;
-  });
-}
-
-function border(cell) {
-  cell.border = {
-    top: { style: 'thin', color: { argb: 'FFccddee' } },
-    left: { style: 'thin', color: { argb: 'FFccddee' } },
-    bottom: { style: 'thin', color: { argb: 'FFccddee' } },
-    right: { style: 'thin', color: { argb: 'FFccddee' } },
-  };
-}
-
-function borderRow(row) {
-  row.eachCell({ includeEmpty: true }, cell => border(cell));
-}
-
-// ─── Load version data from DB ─────────────────────────────────────────────────
-
-function loadVersionData(versionId) {
+function loadData(versionId) {
   const db = getDb();
   const version = db.prepare('SELECT * FROM QuoteVersion WHERE id = ?').get(versionId);
   if (!version) throw new Error(`Version ${versionId} not found`);
-  const product = db.prepare('SELECT * FROM Product WHERE id = ?').get(version.product_id);
-  const params  = db.prepare('SELECT * FROM QuoteParams WHERE version_id = ?').get(versionId) || {};
+  const product  = db.prepare('SELECT * FROM Product WHERE id = ?').get(version.product_id);
+  const params   = db.prepare('SELECT * FROM QuoteParams WHERE version_id = ?').get(versionId) || {};
   return {
-    version,
-    product,
-    params,
-    mold_parts:        db.prepare('SELECT * FROM MoldPart WHERE version_id = ? ORDER BY sort_order').all(versionId),
-    hardware_items:    db.prepare('SELECT * FROM HardwareItem WHERE version_id = ? ORDER BY sort_order').all(versionId),
-    packaging_items:   db.prepare('SELECT * FROM PackagingItem WHERE version_id = ? ORDER BY sort_order').all(versionId),
-    painting_detail:   db.prepare('SELECT * FROM PaintingDetail WHERE version_id = ?').get(versionId) || {},
-    electronic_summary:db.prepare('SELECT * FROM ElectronicSummary WHERE version_id = ?').get(versionId) || {},
-    transport_config:  db.prepare('SELECT * FROM TransportConfig WHERE version_id = ?').get(versionId) || {},
-    mold_cost:         db.prepare('SELECT * FROM MoldCost WHERE version_id = ?').get(versionId) || {},
-    product_dimension: db.prepare('SELECT * FROM ProductDimension WHERE version_id = ?').get(versionId) || {},
-    material_prices:   db.prepare('SELECT * FROM MaterialPrice WHERE version_id = ? ORDER BY id').all(versionId),
-    machine_prices:    db.prepare('SELECT * FROM MachinePrice WHERE version_id = ? ORDER BY id').all(versionId),
+    version, product, params,
+    moldParts:      db.prepare('SELECT * FROM MoldPart     WHERE version_id = ? ORDER BY sort_order').all(versionId),
+    hardwareItems:  db.prepare('SELECT * FROM HardwareItem WHERE version_id = ? ORDER BY sort_order').all(versionId),
+    electronicItems:db.prepare('SELECT * FROM ElectronicItem WHERE version_id = ? ORDER BY sort_order').all(versionId),
+    packagingItems: db.prepare('SELECT * FROM PackagingItem WHERE version_id = ? ORDER BY sort_order').all(versionId),
+    paintingDetail: db.prepare('SELECT * FROM PaintingDetail WHERE version_id = ?').get(versionId) || {},
+    transportConfig:db.prepare('SELECT * FROM TransportConfig WHERE version_id = ?').get(versionId) || {},
+    moldCost:       db.prepare('SELECT * FROM MoldCost WHERE version_id = ?').get(versionId) || {},
+    productDim:     db.prepare('SELECT * FROM ProductDimension WHERE version_id = ?').get(versionId) || {},
+    materialPrices: db.prepare('SELECT * FROM MaterialPrice WHERE version_id = ? ORDER BY id').all(versionId),
+    machinePrices:  db.prepare('SELECT * FROM MachinePrice  WHERE version_id = ? ORDER BY id').all(versionId),
   };
 }
 
-// ─── Cost Calculations (mirrors frontend vq-summary logic) ────────────────────
+// ─── Cell helper — only write to data cells, skip formula cells ───────────────
 
-function calcSummary(d) {
-  const { params = {}, mold_parts = [], hardware_items = [], packaging_items = [],
-          painting_detail: pd = {}, transport_config: tc = {},
-          product_dimension: dim = {}, mold_cost: mc = {} } = d;
-
-  const markupBody  = parseFloat(params.markup_body) || 0;
-  const markupPkg   = parseFloat(params.markup_packaging) || 0;
-  const markupPoint = parseFloat(params.markup_point) || 1;
-  const paymentDiv  = parseFloat(params.payment_divisor) || 0.98;
-  const surcharge   = parseFloat(params.surcharge_pct) || 0.004;
-  const boxPrice    = parseFloat(params.box_price_hkd) || 0;
-  const hkdUsd      = parseFloat(params.hkd_usd) || 0.1291;
-  const rmb_hkd     = parseFloat(params.rmb_hkd) || 0.85;
-
-  const rawSub  = mold_parts.reduce((s, p) => s + (parseFloat(p.material_cost_hkd) || 0), 0);
-  const moldSub = mold_parts.reduce((s, p) => s + (parseFloat(p.molding_labor) || 0), 0);
-  const purSub  = hardware_items.reduce((s, h) => s + (parseFloat(h.new_price) || 0), 0);
-  const decSub  = (parseFloat(pd.labor_cost_hkd) || 0) + (parseFloat(pd.paint_cost_hkd) || 0);
-
-  const rawAmt  = rawSub  * (1 + markupBody);
-  const moldAmt = moldSub * (1 + markupBody);
-  const purAmt  = purSub  * (1 + markupBody);
-  const decAmt  = decSub  * (1 + markupBody);
-  const bodyCost = rawAmt + moldAmt + purAmt + decAmt;
-
-  const pkgItems = packaging_items.reduce((s, i) => s + (parseFloat(i.new_price) || 0), 0);
-  const packagingTotal = (pkgItems + boxPrice) * (1 + markupPkg);
-
-  const cartonPrice   = parseFloat(dim.carton_price) || 0;
-  const pcsPerCarton  = parseInt(dim.pcs_per_carton) || 1;
-  const cartonPerPc   = pcsPerCarton > 0 ? cartonPrice / pcsPerCarton : 0;
-
-  const subBeforeTransport = bodyCost + packagingTotal + cartonPerPc;
-
-  const cuft      = parseFloat(tc.cuft_per_box) || 0;
-  const pcsPerBox = parseFloat(tc.pcs_per_box) || 1;
-  const yt40Cost  = parseFloat(tc.yt_40_cost) || 0;
-  const yt40Cuft  = parseFloat(tc.container_40_cuft) || 0;
-
-  function transportPerPc(containerCuft, shippingCost, moq) {
-    if (!containerCuft || !cuft || !moq) return 0;
-    const boxes = Math.ceil(moq / pcsPerBox);
-    const cuftNeeded = boxes * cuft;
-    return (shippingCost / containerCuft) * cuftNeeded / moq;
-  }
-
-  const moldAmortRmb = parseFloat(mc.amortization_rmb) || 0;
-  const moldPerPc = rmb_hkd > 0 ? moldAmortRmb / rmb_hkd : 0;
-
-  const moqs = [2500, 5000, 10000, 15000];
-  const matrix = moqs.map(moq => {
-    const trans = transportPerPc(yt40Cuft, yt40Cost, moq);
-    const subTotal = subBeforeTransport + trans;
-    const surchargeAmt = subTotal * surcharge;
-    const afterSurcharge = subTotal + surchargeAmt;
-    const withPoint = afterSurcharge * markupPoint;
-    const totalHkd = withPoint / paymentDiv;
-    const totalUsd = totalHkd * hkdUsd;
-    return {
-      moq, rawAmt, moldAmt, purAmt, decAmt, bodyCost, packagingTotal, cartonPerPc,
-      transport: trans, subTotal, surchargeAmt, markupPointAmt: withPoint - afterSurcharge,
-      withPoint, totalHkd, totalUsd,
-      totalWithMoldHkd: totalHkd + moldPerPc,
-      totalWithMoldUsd: (totalHkd + moldPerPc) * hkdUsd,
-    };
-  });
-
-  return { matrix, bodyCost, packagingTotal, cartonPerPc, moldPerPc,
-    rawAmt, moldAmt, purAmt, decAmt,
-    params: { markupBody, markupPkg, markupPoint, paymentDiv, surcharge, hkdUsd, rmb_hkd, boxPrice } };
+function setVal(ws, row, col, value) {
+  const cell = ws.getCell(row, col);
+  // Never overwrite formula cells — they calculate automatically
+  if (cell.value && typeof cell.value === 'object' && cell.value.formula) return;
+  // Guard against NaN (invalid XML)
+  if (typeof value === 'number' && isNaN(value)) value = null;
+  cell.value = (value === undefined) ? null : value;
 }
 
-// ─── Sheet 1: VQ Summary ──────────────────────────────────────────────────────
+// Clear a range of data columns (skip formula columns)
+function clearRows(ws, startRow, endRow, dataCols) {
+  for (let r = startRow; r <= endRow; r++) {
+    for (const c of dataCols) {
+      const cell = ws.getCell(r, c);
+      if (!(cell.value && typeof cell.value === 'object' && cell.value.formula)) {
+        cell.value = null;
+      }
+    }
+  }
+}
 
-function buildSummarySheet(wb, d, calc) {
-  const ws = wb.addWorksheet('VQ Summary');
-  const moqs = calc.matrix.map(r => r.moq);
-  const cols = 1 + moqs.length; // label + N moq columns
+// ─── Fill Vendor Quotation sheet ─────────────────────────────────────────────
 
-  ws.columns = [
-    { width: 28 },
-    { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 },
+function fillVQ(ws, d) {
+  const { version, product, params, packagingItems, productDim, transportConfig } = d;
+
+  // ── Header (rows 2–5) ──────────────────────────────────────────────────────
+  setVal(ws, 2, 3, product?.vendor || '');
+  setVal(ws, 2, 8, params.prepared_by || '');
+  setVal(ws, 3, 3, product?.item_no || '');
+  setVal(ws, 3, 8, version.quote_date ? new Date(version.quote_date) : '');
+  setVal(ws, 4, 3, product?.item_desc || '');
+  setVal(ws, 4, 8, version.version_name || '');
+
+  // ── Section A (rows 11–16): Body Cost — row 11 formula stays (='BCD'!F23) ─
+  // Just update part no and description for main body row
+  if (product?.item_no) {
+    setVal(ws, 11, 1, product.item_no + '-00');
+    setVal(ws, 11, 2, product.item_desc || '');
+    setVal(ws, 11, 5, 2500);  // default MOQ
+    setVal(ws, 11, 6, 1);     // usage 1 per toy
+    // G11 = ='Body Cost Breakdown'!F23 — do NOT overwrite (formula)
+  }
+  // Clear accessory rows 12–16 data
+  clearRows(ws, 12, 16, [1, 2, 5, 6, 7]);
+
+  // ── Section B (rows 23–35): Packaging ──────────────────────────────────────
+  const PKG_START = 23, PKG_END = 35;
+  // Clear first
+  clearRows(ws, PKG_START, PKG_END, [1, 2, 3, 5, 6, 7]);
+  // Fill packaging items
+  const moq = params.moq_default || 2500;
+  packagingItems.slice(0, PKG_END - PKG_START + 1).forEach((item, i) => {
+    const r = PKG_START + i;
+    setVal(ws, r, 2, item.name || '');
+    setVal(ws, r, 3, item.remark || '');    // specifications / remark
+    setVal(ws, r, 5, moq);
+    setVal(ws, r, 6, item.quantity || 1);
+    setVal(ws, r, 7, parseFloat(item.new_price) || 0);
+    // H col = formula =ROUND(F*G,2) — not touched
+  });
+  // Mark Up row 36: G36 = markup%
+  const pkgMarkup = parseFloat(params.markup_packaging) || 0.12;
+  setVal(ws, 36, 7, pkgMarkup);
+
+  // ── Section D (row 52): Master Carton ──────────────────────────────────────
+  if (productDim) {
+    setVal(ws, 52, 2, parseFloat(productDim.carton_l_inch) || null);
+    setVal(ws, 52, 3, parseFloat(productDim.carton_w_inch) || null);
+    setVal(ws, 52, 4, parseFloat(productDim.carton_h_inch) || null);
+    setVal(ws, 52, 6, parseInt(productDim.pcs_per_carton) || null);
+    setVal(ws, 52, 7, parseFloat(productDim.carton_price) || null);
+  }
+
+  // ── Section E (row 58): Transport cost parameters ──────────────────────────
+  // Template: F58=Ex-Factory cost/CuFt, G58=FOB FCL cost/CuFt, H58=FOB LCL cost/CuFt
+  // C58 = formula =B52*C52*D52/1728*F52 (CuFt per toy, don't touch)
+  if (transportConfig) {
+    setVal(ws, 58, 6, parseFloat(transportConfig.hk_10t_cost) || 0.5);   // Ex-Factory
+    setVal(ws, 58, 7, parseFloat(transportConfig.yt_40_cost)  || 4.3);   // FOB FCL
+    setVal(ws, 58, 8, parseFloat(transportConfig.hk_40_cost)  || 15.85); // FOB LCL
+  }
+}
+
+// ─── Fill Body Cost Breakdown sheet ──────────────────────────────────────────
+
+function fillBCD(ws, d) {
+  const { version, product, params, moldParts, hardwareItems, electronicItems,
+          paintingDetail, materialPrices } = d;
+
+  // ── Header (row 7) ─────────────────────────────────────────────────────────
+  setVal(ws, 7, 2, product?.item_desc || '');
+  setVal(ws, 7, 3, '0');  // body cost revision
+  setVal(ws, 7, 4, product?.vendor || '');
+  setVal(ws, 7, 6, params.prepared_by || '');
+  setVal(ws, 7, 8, version.quote_date ? new Date(version.quote_date) : '');
+
+  // ── Summary section markup % (rows 14–22, col E) ──────────────────────────
+  const bodyMkup = parseFloat(params.markup_body) || 0.18;
+  for (const r of [14, 15, 16, 19, 20, 21, 22]) {
+    setVal(ws, r, 5, bodyMkup);
+  }
+  setVal(ws, 17, 5, 0); // D (Expensive Components) — markup 0%
+
+  // ── Section A: Raw Material (rows 31–34 = ABS, PP, PCTG, PVC) ─────────────
+  // Group mold parts by material type → sum weight_g
+  const matWeight = {};
+  moldParts.forEach(p => {
+    const m = (p.material || '').toUpperCase().trim();
+    if (m) matWeight[m] = (matWeight[m] || 0) + (parseFloat(p.weight_g) || 0);
+  });
+
+  // Helper: get price per KG for a material type
+  function matPricePerKg(matType) {
+    const mt = matType.toUpperCase();
+    const found = materialPrices.find(mp => (mp.material_type || '').toUpperCase() === mt);
+    if (!found) return null;
+    if (found.price_hkd_per_g) return found.price_hkd_per_g * 1000;  // g→kg
+    if (found.price_hkd_per_lb) return found.price_hkd_per_lb * 2.20462; // lb→kg
+    return null;
+  }
+
+  // Fixed template rows for plastic types (add more if needed)
+  const plasticRows = [
+    { row: 31, type: 'ABS' },
+    { row: 32, type: 'PP'  },
+    { row: 33, type: 'PCTG' },
+    { row: 34, type: 'PVC' },
   ];
 
-  // Title row
-  ws.mergeCells(1, 1, 1, cols);
-  const titleCell = ws.getCell(1, 1);
-  titleCell.value = `Vendor Quotation — ${d.product?.item_no || ''} ${d.product?.item_desc || ''}`;
-  Object.assign(titleCell, STYLES.title);
-  ws.getRow(1).height = 28;
+  // Fill known plastic rows
+  const usedTypes = new Set();
+  plasticRows.forEach(({ row, type }) => {
+    const weight = matWeight[type] || null;
+    const priceKg = matPricePerKg(type);
+    setVal(ws, row, 2, type);
+    setVal(ws, row, 4, weight);
+    setVal(ws, row, 5, priceKg);
+    if (weight) usedTypes.add(type);
+    // F col = formula =ROUND(D*E/1000,3) — not touched
+  });
 
-  // Info rows
-  function infoRow(label, value) {
-    const r = ws.addRow([label, value]);
-    r.getCell(1).font = { bold: true, size: 10 };
-    r.getCell(2).font = { size: 10 };
-    ws.mergeCells(r.number, 2, r.number, cols);
-    borderRow(r);
-    r.height = 16;
+  // If there are other material types not in the fixed rows, we skip (template limitation)
+
+  // ── Section B: Molding Labour (rows 67–90 = injection molding data) ────────
+  const MOLD_START = 67, MOLD_END = 90;
+  clearRows(ws, MOLD_START, MOLD_END, [1, 2, 3, 4, 5]);
+
+  moldParts.slice(0, MOLD_END - MOLD_START + 1).forEach((part, i) => {
+    const r = MOLD_START + i;
+    const shots = parseFloat(part.sets_per_toy) || 1;
+    const laborPerToy = parseFloat(part.molding_labor) || 0;
+    const costPerShot = shots > 0 ? laborPerToy / shots : 0;
+
+    setVal(ws, r, 1, part.part_no || '');
+    setVal(ws, r, 2, part.description || '');
+    setVal(ws, r, 3, part.machine_type || '');
+    setVal(ws, r, 4, shots);
+    setVal(ws, r, 5, parseFloat(costPerShot.toFixed(6)));
+    // F col = formula =D*E — not touched (already in template)
+  });
+
+  // ── Section C: Electronics (rows 101–103) ──────────────────────────────────
+  const ELEC_START = 101, ELEC_END = 103;
+  clearRows(ws, ELEC_START, ELEC_END, [2, 3, 4, 5]);
+
+  electronicItems.slice(0, ELEC_END - ELEC_START + 1).forEach((item, i) => {
+    const r = ELEC_START + i;
+    setVal(ws, r, 2, item.part_name || '');
+    setVal(ws, r, 3, 'pc');
+    setVal(ws, r, 4, parseFloat(item.quantity) || 1);
+    setVal(ws, r, 5, parseFloat(item.unit_price_usd) || 0);
+    // F col = formula =E*D — not touched
+  });
+
+  // ── Section C: Other Hardware (rows 113–134) ───────────────────────────────
+  const HW_START = 113, HW_END = 134;
+  clearRows(ws, HW_START, HW_END, [2, 3, 4, 5]);
+
+  hardwareItems.slice(0, HW_END - HW_START + 1).forEach((item, i) => {
+    const r = HW_START + i;
+    setVal(ws, r, 2, item.name || '');
+    setVal(ws, r, 3, 'pc');
+    setVal(ws, r, 4, parseFloat(item.quantity) || 1);
+    setVal(ws, r, 5, parseFloat(item.new_price) || 0);
+    // F col = formula =D*E — not touched
+  });
+
+  // ── Section E: Decoration (row 153) ────────────────────────────────────────
+  if (paintingDetail) {
+    const sprayOps = parseInt(paintingDetail.spray_count) || 0;
+    const laborPerOp = sprayOps > 0
+      ? (parseFloat(paintingDetail.labor_cost_hkd) || 0) / sprayOps
+      : 0;
+    setVal(ws, 153, 4, sprayOps || null);
+    setVal(ws, 153, 5, parseFloat(laborPerOp.toFixed(4)) || null);
+    // F153 = formula =E153*D153 — not touched
   }
 
-  infoRow('品名 Item No.', d.product?.item_no || '');
-  infoRow('描述 Description', d.product?.item_desc || '');
-  infoRow('厂家 Vendor', d.product?.vendor || '');
-  infoRow('版本 Version', d.version?.version_name || d.version?.source_sheet || '');
-  infoRow('日期 Date', d.version?.quote_date || d.version?.date_code || '');
-
-  ws.addRow([]); // spacer
-
-  // MOQ header
-  const hdrRow = ws.addRow(['项目', ...moqs.map(q => `${(q/1000).toFixed(1)}K pcs`)]);
-  applyStyle(hdrRow, STYLES.header);
-  borderRow(hdrRow);
-  hdrRow.height = 20;
-
-  // Cost rows helper
-  function costRow(label, vals, style = STYLES.plain) {
-    const r = ws.addRow([label, ...vals.map(v => n(v))]);
-    applyStyle(r, style);
-    r.eachCell((cell, col) => {
-      if (col > 1) { cell.numFmt = '#,##0.0000'; cell.alignment = { horizontal: 'right', vertical: 'middle' }; }
-      border(cell);
-    });
-    r.height = 16;
-    return r;
-  }
-
-  const m = calc.matrix;
-  costRow('A. Body Cost HKD',             m.map(r => r.bodyCost), STYLES.label);
-  costRow('  A1. Raw Material',           m.map(r => r.rawAmt), STYLES.plain);
-  costRow('  A2. Molding Labour',         m.map(r => r.moldAmt), STYLES.plain);
-  costRow('  A3. Purchase Parts',         m.map(r => r.purAmt), STYLES.plain);
-  costRow('  A4. Decoration',             m.map(r => r.decAmt), STYLES.plain);
-  costRow('B. Packaging HKD',             m.map(r => r.packagingTotal), STYLES.label);
-  costRow('D. Master Carton /pc HKD',     m.map(r => r.cartonPerPc), STYLES.label);
-  costRow('E. Transport /pc HKD (YT40)',  m.map(r => r.transport), STYLES.label);
-  costRow('小计 Sub Total HKD',           m.map(r => r.subTotal), STYLES.total);
-  costRow(`附加税 (${(calc.params.surcharge*100).toFixed(2)}%)`, m.map(r => r.surchargeAmt), STYLES.plain);
-  costRow(`码点 ×${calc.params.markupPoint.toFixed(4)}`,        m.map(r => r.markupPointAmt), STYLES.plain);
-  costRow(`找数 ÷${calc.params.paymentDiv.toFixed(4)}`,         m.map(r => r.totalHkd - r.withPoint), STYLES.plain);
-  costRow('合计 Total HKD',               m.map(r => r.totalHkd), STYLES.total);
-  costRow('合计 Total USD',               m.map(r => r.totalUsd), STYLES.total);
-
-  ws.addRow([]); // spacer
-
-  costRow('模费摊销 /pc HKD',             m.map(() => calc.moldPerPc), STYLES.plain);
-  costRow('含模费 Total HKD',             m.map(r => r.totalWithMoldHkd), STYLES.grand);
-  costRow('含模费 Total USD',             m.map(r => r.totalWithMoldUsd), STYLES.grand);
-
-  ws.addRow([]);
-
-  // Parameters block
-  const pRow = ws.addRow(['参数 Parameters']);
-  applyStyle(pRow, STYLES.section);
-  ws.mergeCells(pRow.number, 1, pRow.number, cols);
-  pRow.height = 18;
-
-  const { params: p } = calc;
-  function paramRow(label, value) {
-    const r = ws.addRow([label, value]);
-    r.getCell(1).font = { size: 10 };
-    r.getCell(2).font = { bold: true, size: 10 };
-    r.getCell(2).alignment = { horizontal: 'right' };
-    ws.mergeCells(r.number, 2, r.number, cols);
-    borderRow(r);
-    r.height = 15;
-  }
-  paramRow('HKD / USD',        p.hkdUsd);
-  paramRow('RMB → HKD',        p.rmb_hkd);
-  paramRow('Body Mark Up',     pct(p.markupBody));
-  paramRow('Packaging Mark Up',pct(p.markupPkg));
-  paramRow('Box Price HKD',    n(p.boxPrice, 4));
-  paramRow('附加税率',          pct(p.surcharge));
-  paramRow('码点',              `×${p.markupPoint.toFixed(4)}`);
-  paramRow('找数',              `÷${p.paymentDiv.toFixed(4)}`);
-}
-
-// ─── Sheet 2: Body Cost Breakdown ─────────────────────────────────────────────
-
-function buildBdSheet(wb, d) {
-  const ws = wb.addWorksheet('Body Cost Breakdown');
-
-  ws.columns = [
-    { width: 8 }, { width: 22 }, { width: 8 }, { width: 10 },
-    { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 },
-  ];
-
-  function secHeader(label) {
-    const r = ws.addRow([label]);
-    ws.mergeCells(r.number, 1, r.number, 9);
-    applyStyle(r, STYLES.section);
-    r.height = 18;
-  }
-
-  function colHeader(labels) {
-    const r = ws.addRow(labels);
-    applyStyle(r, STYLES.header);
-    borderRow(r);
-    r.height = 18;
-  }
-
-  // A. Raw Material
-  secHeader('A. Raw Material Cost');
-  colHeader(['模号', '名称/描述', '料型', '料重(g)', '料价HKD/g', '料金额HKD', '', '', '']);
-  d.mold_parts.forEach(p => {
-    const r = ws.addRow([p.part_no, p.description, p.material, n(p.weight_g, 4),
-      n(p.unit_price_hkd_g, 6), n(p.material_cost_hkd, 4)]);
-    applyStyle(r, STYLES.plain);
-    [4,5,6].forEach(c => { r.getCell(c).numFmt = '#,##0.0000'; r.getCell(c).alignment = { horizontal: 'right' }; });
-    borderRow(r);
-    r.height = 15;
-  });
-  const rawSub = d.mold_parts.reduce((s, p) => s + (parseFloat(p.material_cost_hkd) || 0), 0);
-  const rSumRow = ws.addRow(['', '合计', '', '', '', n(rawSub, 4)]);
-  applyStyle(rSumRow, STYLES.total);
-  rSumRow.getCell(6).numFmt = '#,##0.0000';
-  rSumRow.getCell(6).alignment = { horizontal: 'right' };
-  borderRow(rSumRow);
-
-  ws.addRow([]);
-
-  // B. Molding Labour
-  secHeader('B. Molding Labour Cost');
-  colHeader(['模号', '名称', '机型', '出模件数', '出模套数', '目标数', '啤工HKD', '', '']);
-  d.mold_parts.forEach(p => {
-    const r = ws.addRow([p.part_no, p.description, p.machine_type,
-      p.cavity_count, p.sets_per_toy, p.target_qty, n(p.molding_labor, 4)]);
-    applyStyle(r, STYLES.plain);
-    r.getCell(7).numFmt = '#,##0.0000';
-    r.getCell(7).alignment = { horizontal: 'right' };
-    borderRow(r);
-    r.height = 15;
-  });
-  const moldSub = d.mold_parts.reduce((s, p) => s + (parseFloat(p.molding_labor) || 0), 0);
-  const mSumRow = ws.addRow(['', '合计', '', '', '', '', n(moldSub, 4)]);
-  applyStyle(mSumRow, STYLES.total);
-  mSumRow.getCell(7).numFmt = '#,##0.0000';
-  mSumRow.getCell(7).alignment = { horizontal: 'right' };
-  borderRow(mSumRow);
-
-  ws.addRow([]);
-
-  // C. Purchase Parts
-  secHeader('C. Purchase Parts Cost');
-  colHeader(['名称', '用量', '开模报价', '样板报价', '差额', '含税', '', '', '']);
-  d.hardware_items.forEach(h => {
-    const r = ws.addRow([h.name, h.quantity, n(h.old_price, 4), n(h.new_price, 4),
-      n(h.difference, 4), h.tax_type || '']);
-    applyStyle(r, STYLES.plain);
-    [3,4,5].forEach(c => { r.getCell(c).numFmt = '#,##0.0000'; r.getCell(c).alignment = { horizontal: 'right' }; });
-    borderRow(r);
-    r.height = 15;
-  });
-
-  ws.addRow([]);
-
-  // D. Decoration
-  secHeader('D. Decoration (喷油)');
-  const pd = d.painting_detail || {};
-  colHeader(['项目', '数值', '', '', '', '', '', '', '']);
-  [
-    ['夹 (Clamp)', pd.clamp_count], ['印 (Print)', pd.print_count],
-    ['抹油 (Wipe)', pd.wipe_count], ['边 (Edge)', pd.edge_count],
-    ['散枪 (Spray)', pd.spray_count], ['总次数', pd.total_operations],
-    ['喷油人工 HKD', pd.labor_cost_hkd], ['油漆 HKD', pd.paint_cost_hkd],
-    ['报价 HKD', pd.quoted_price_hkd],
-  ].forEach(([lbl, val]) => {
-    const r = ws.addRow([lbl, val != null ? n(val, 4) : '—']);
-    applyStyle(r, STYLES.plain);
-    borderRow(r);
-    r.height = 15;
-  });
-}
-
-// ─── Sheet 3: Packaging ───────────────────────────────────────────────────────
-
-function buildPkgSheet(wb, d) {
-  const ws = wb.addWorksheet('Packaging');
-  ws.columns = [
-    { width: 28 }, { width: 10 }, { width: 12 }, { width: 12 }, { width: 12 }, { width: 10 },
-  ];
-
-  const hdr = ws.addRow(['Packaging — B. 包装材料']);
-  ws.mergeCells(1, 1, 1, 6);
-  applyStyle(hdr, STYLES.title);
-  hdr.height = 24;
-
-  const colHdr = ws.addRow(['名称', '用量', '开模报价', '样板报价', '差额', '含税']);
-  applyStyle(colHdr, STYLES.header);
-  borderRow(colHdr);
-  colHdr.height = 18;
-
-  d.packaging_items.forEach(item => {
-    const r = ws.addRow([item.name, item.quantity, n(item.old_price, 4),
-      n(item.new_price, 4), n(item.difference, 4), item.tax_type || '']);
-    applyStyle(r, STYLES.plain);
-    [3,4,5].forEach(c => { r.getCell(c).numFmt = '#,##0.0000'; r.getCell(c).alignment = { horizontal: 'right' }; });
-    borderRow(r);
-    r.height = 15;
-  });
-
-  const boxPrice = parseFloat(d.params?.box_price_hkd) || 0;
-  const boxRow = ws.addRow(['纸箱 (Box)', 1, '', n(boxPrice, 4), '']);
-  applyStyle(boxRow, STYLES.label);
-  boxRow.getCell(4).numFmt = '#,##0.0000';
-  boxRow.getCell(4).alignment = { horizontal: 'right' };
-  borderRow(boxRow);
-}
-
-// ─── Sheet 4: Mold Cost ───────────────────────────────────────────────────────
-
-function buildMoldSheet(wb, d) {
-  const ws = wb.addWorksheet('Mold Cost');
-  ws.columns = [{ width: 28 }, { width: 16 }, { width: 16 }];
-
-  const hdr = ws.addRow(['模费 Mold Cost']);
-  ws.mergeCells(1, 1, 1, 3);
-  applyStyle(hdr, STYLES.title);
-  hdr.height = 24;
-
-  const mc = d.mold_cost || {};
-  [
-    ['开模费 RMB',     mc.mold_cost_rmb],
-    ['五金模费 RMB',   mc.hardware_mold_cost_rmb],
-    ['喷油模费 RMB',   mc.paint_mold_cost_rmb],
-    ['模费合计 RMB',   mc.total_mold_rmb],
-    ['模费合计 USD',   mc.total_mold_usd],
-    ['客户补贴 USD',   mc.customer_subsidy_usd],
-    ['摊销数量',       mc.amortization_qty],
-    ['摊销金额 RMB',   mc.amortization_rmb],
-    ['摊销金额 USD',   mc.amortization_usd],
-    ['客户报价 USD',   mc.customer_quote_usd],
-  ].forEach(([label, val]) => {
-    const r = ws.addRow([label, val != null ? n(val, 4) : '—']);
-    const isTot = label.includes('合计') || label.includes('摊销金额');
-    applyStyle(r, isTot ? STYLES.total : STYLES.plain);
-    r.getCell(2).alignment = { horizontal: 'right' };
-    if (typeof val === 'number') r.getCell(2).numFmt = '#,##0.0000';
-    borderRow(r);
-    r.height = 16;
-  });
+  // ── Section E: Assembly (row 165) ──────────────────────────────────────────
+  // Assembly hours from labor_hkd param (hourly rate) — use a default assembly op
+  const assemblyHours = parseFloat(params.assembly_hours) || null;
+  const laborRate = parseFloat(params.labor_hkd) || null;
+  setVal(ws, 165, 4, assemblyHours);
+  setVal(ws, 165, 5, laborRate);
 }
 
 // ─── Main Export Function ─────────────────────────────────────────────────────
 
 async function exportVersion(versionId) {
-  const d = loadVersionData(versionId);
-  const calc = calcSummary(d);
+  const d = loadData(versionId);
 
   const wb = new ExcelJS.Workbook();
-  wb.creator = 'RR-Portal Quotation System';
-  wb.created = new Date();
+  await wb.xlsx.readFile(TEMPLATE_PATH);
 
-  buildSummarySheet(wb, d, calc);
-  buildBdSheet(wb, d);
-  buildPkgSheet(wb, d);
-  buildMoldSheet(wb, d);
+  // ExcelJS may write NaN formula results as invalid XML — clear them
+  wb.eachSheet(ws => {
+    ws.eachRow({ includeEmpty: false }, row => {
+      row.eachCell({ includeEmpty: false }, cell => {
+        if (cell.value && typeof cell.value === 'object' && cell.value.formula !== undefined) {
+          const r = cell.value.result;
+          if (r === null || r === undefined || (typeof r === 'number' && isNaN(r))) {
+            cell.value = { formula: cell.value.formula };  // keep formula, drop bad result
+          }
+        }
+      });
+    });
+  });
+
+  const vqWs  = wb.getWorksheet('Vendor Quotation');
+  const bcdWs = wb.getWorksheet('Body Cost Breakdown');
+
+  if (!vqWs)  throw new Error('Template missing "Vendor Quotation" sheet');
+  if (!bcdWs) throw new Error('Template missing "Body Cost Breakdown" sheet');
+
+  fillVQ(vqWs, d);
+  fillBCD(bcdWs, d);
 
   return wb.xlsx.writeBuffer();
 }
