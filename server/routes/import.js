@@ -51,9 +51,10 @@ router.post('/', upload.single('file'), async (req, res) => {
       // QuoteParams
       const p = data.params || {};
       db.prepare(
-        `INSERT INTO QuoteParams (version_id, hkd_rmb_quote, hkd_rmb_check, rmb_hkd, hkd_usd, labor_hkd, box_price_hkd)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).run(versionId, p.hkd_rmb_quote, p.hkd_rmb_check, p.rmb_hkd, p.hkd_usd, p.labor_hkd, p.box_price_hkd);
+        `INSERT INTO QuoteParams (version_id, hkd_rmb_quote, hkd_rmb_check, rmb_hkd, hkd_usd, labor_hkd, box_price_hkd, markup_body, markup_packaging)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(versionId, p.hkd_rmb_quote, p.hkd_rmb_check, p.rmb_hkd, p.hkd_usd, p.labor_hkd, p.box_price_hkd,
+        p.markup_body ?? 0.18, p.markup_packaging ?? 0.12);
 
       // MaterialPrice
       const insertMat = db.prepare(
@@ -172,6 +173,33 @@ router.post('/', upload.single('file'), async (req, res) => {
           mc.total_mold_rmb, mc.total_mold_usd, mc.customer_subsidy_usd, mc.amortization_qty,
           mc.amortization_rmb, mc.amortization_usd, mc.customer_quote_usd
         );
+      }
+
+      // RawMaterial — derive from moldParts (material + unit_price_hkd_g)
+      {
+        // Group by material: sum weight, take price from moldPart's unit_price_hkd_g
+        const matMap = new Map(); // material -> { weight, pricePerG }
+        for (const mp of (data.moldParts || [])) {
+          if (!mp.material) continue;
+          const key = mp.material.trim();
+          if (!key) continue;
+          const weight = parseFloat(mp.weight_g) || 0;
+          const existing = matMap.get(key);
+          if (existing) {
+            existing.weight += weight;
+          } else {
+            matMap.set(key, { weight, pricePerG: mp.unit_price_hkd_g });
+          }
+        }
+        const insertRaw = db.prepare(
+          `INSERT INTO RawMaterial (version_id, category, material_name, spec, weight_g, unit_price_per_kg, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        let sortIdx = 0;
+        for (const [matName, { weight, pricePerG }] of matMap) {
+          const pricePerKg = pricePerG ? pricePerG * 1000 : null;
+          insertRaw.run(versionId, 'plastic', matName, null, weight, pricePerKg, sortIdx++);
+        }
       }
 
       // ProductDimension

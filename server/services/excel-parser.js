@@ -33,8 +33,11 @@ function detectLatestSheet(workbook) {
   const candidates = sheets.filter(n => n.includes('报价明细'));
 
   if (candidates.length === 0) {
-    // Fallback: return last sheet
-    return sheets[sheets.length - 1];
+    // Fallback: prefer sheets containing "报价" (e.g. "3K报价-印尼-260321")
+    const quoteCandidates = sheets.filter(n => n.includes('报价'));
+    if (quoteCandidates.length > 0) return quoteCandidates[0];
+    // Last resort: first sheet
+    return sheets[0];
   }
 
   if (candidates.length === 1) return candidates[0];
@@ -177,7 +180,7 @@ function parseMoldParts(ws) {
       unit_price_hkd_g,
       machine_type,
       cavity_count: cavity_count ? Math.round(cavity_count) : null,
-      sets_per_toy: sets_per_toy ? Math.round(sets_per_toy) : null,
+      sets_per_toy: sets_per_toy || null,
       target_qty: target_qty ? Math.round(target_qty) : null,
       molding_labor,
       material_cost_hkd,
@@ -414,6 +417,19 @@ async function parseWorkbook(filePath) {
   }
 
   const header = parseHeader(ws);
+
+  // If B1 doesn't look like a product number, try other sheets with "报价" in name
+  if (!header.product_no || header.product_no.length > 30 || header.product_no.includes('明细表')) {
+    for (const otherWs of workbook.worksheets) {
+      if (otherWs.name === ws.name) continue;
+      const b1 = strVal(otherWs.getCell('B1'));
+      if (b1 && b1.length <= 30 && !b1.includes('明细表')) {
+        header.product_no = b1;
+        break;
+      }
+    }
+  }
+
   const moldParts = parseMoldParts(ws);
   const costItems = parseCostItems(ws);
   const summary = parseSummary(ws);
