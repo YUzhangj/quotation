@@ -22,6 +22,8 @@ const app = (() => {
     'bd-purchase':  typeof tab_bd_purchase !== 'undefined' ? tab_bd_purchase : null,
     'bd-decoration':typeof tab_bd_decoration !== 'undefined' ? tab_bd_decoration : null,
     'bd-others':    typeof tab_bd_others !== 'undefined' ? tab_bd_others : null,
+    'bd-sewing':   typeof tab_bd_sewing !== 'undefined' ? tab_bd_sewing : null,
+    'bd-rotocast': typeof tab_bd_rotocast !== 'undefined' ? tab_bd_rotocast : null,
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
