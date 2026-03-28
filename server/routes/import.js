@@ -40,9 +40,9 @@ router.post('/', upload.single('file'), async (req, res) => {
     // ── Create QuoteVersion ────────────────────────────────────────────────
     const versionName = data.product.date_code || data.sheetName;
     const vr = db.prepare(
-      `INSERT INTO QuoteVersion (product_id, version_name, source_sheet, date_code, quote_date, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)`
-    ).run(product.id, versionName, data.sheetName, data.product.date_code, data.product.date_code, now, now);
+      `INSERT INTO QuoteVersion (product_id, version_name, source_sheet, date_code, quote_date, status, format_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`
+    ).run(product.id, versionName, data.sheetName, data.product.date_code, data.product.date_code, data.format_type || 'injection', now, now);
     const versionId = vr.lastInsertRowid;
 
     // ── Insert all data in a transaction ──────────────────────────────────
@@ -199,6 +199,28 @@ router.post('/', upload.single('file'), async (req, res) => {
         for (const [matName, { weight, pricePerG }] of matMap) {
           const pricePerKg = pricePerG ? pricePerG * 1000 : null;
           insertRaw.run(versionId, 'plastic', matName, null, weight, pricePerKg, sortIdx++);
+        }
+      }
+
+      // RotocastItem (plush format)
+      if (data.rotocastItems && data.rotocastItems.length > 0) {
+        const insertRoto = db.prepare(
+          `INSERT INTO RotocastItem (version_id, mold_no, name, output_qty, usage_pcs, unit_price_hkd, total_hkd, remark, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        for (const r of data.rotocastItems) {
+          insertRoto.run(versionId, r.mold_no, r.name, r.output_qty, r.usage_pcs, r.unit_price_hkd, r.total_hkd, r.remark, r.sort_order);
+        }
+      }
+
+      // SewingDetail (plush format)
+      if (data.sewingDetails && data.sewingDetails.length > 0) {
+        const insertSew = db.prepare(
+          `INSERT INTO SewingDetail (version_id, product_name, fabric_name, position, cut_pieces, usage_amount, material_price_rmb, price_rmb, markup_point, total_price_rmb, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        for (const s of data.sewingDetails) {
+          insertSew.run(versionId, s.product_name, s.fabric_name, s.position, s.cut_pieces, s.usage_amount, s.material_price_rmb, s.price_rmb, s.markup_point, s.total_price_rmb, s.sort_order);
         }
       }
 

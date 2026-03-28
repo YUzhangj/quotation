@@ -26,6 +26,14 @@ function strVal(cell) {
 
 // ─── Sheet Detection ──────────────────────────────────────────────────────────
 
+function detectFormat(workbook) {
+  const sheetNames = workbook.worksheets.map(ws => ws.name);
+  const hasPlushIndicator = sheetNames.some(n =>
+    n.includes('车缝明细') || n.includes('搪胶')
+  );
+  return hasPlushIndicator ? 'plush' : 'injection';
+}
+
 function detectLatestSheet(workbook) {
   const sheets = workbook.worksheets.map(ws => ws.name);
 
@@ -126,12 +134,11 @@ function parseHeader(ws) {
 
 // ─── Mold Parts Parser (R17+) ────────────────────────────────────────────────
 
-function parseMoldParts(ws) {
+function parseMoldParts(ws, startRow = 18) {
   const moldParts = [];
 
-  // R17: header — verify A17 = "模号"
-  // R18 onward: data rows
-  let row = 18;
+  // startRow: 18 for injection (header R17), 17 for plush (header R16)
+  let row = startRow;
   let sortOrder = 0;
 
   while (row <= 200) {
@@ -194,6 +201,82 @@ function parseMoldParts(ws) {
   }
 
   return moldParts;
+}
+
+// ─── Rotocast Items Parser (Plush: R20-R23) ────────────────────────────────
+
+function parseRotocastItems(ws) {
+  const items = [];
+  // R20: header (模号 | 名称 | 出数 | 用量pcs | 单价HK | 合计 | 备注)
+  // R21+: data until 合计 row
+  let row = 21;
+  let sortOrder = 0;
+
+  while (row <= 40) {
+    const colA = strVal(ws.getCell(row, 1));
+    const colE = strVal(ws.getCell(row, 5));
+    if ((colA && colA.includes('合计')) || (colE && colE.includes('合计'))) break;
+
+    const mold_no = strVal(ws.getCell(row, 1));
+    const name = strVal(ws.getCell(row, 2));
+    if (!mold_no && !name) { row++; continue; }
+
+    items.push({
+      mold_no, name,
+      output_qty: numVal(ws.getCell(row, 3)) ? Math.round(numVal(ws.getCell(row, 3))) : null,
+      usage_pcs: numVal(ws.getCell(row, 4)) ? Math.round(numVal(ws.getCell(row, 4))) : null,
+      unit_price_hkd: numVal(ws.getCell(row, 5)),
+      total_hkd: numVal(ws.getCell(row, 6)),
+      remark: strVal(ws.getCell(row, 7)),
+      sort_order: sortOrder++,
+    });
+    row++;
+  }
+  return items;
+}
+
+// ─── Sewing Details Parser (车缝明细 sheet) ────────────────────────────────
+
+function parseSewingDetails(workbook) {
+  const wsNames = workbook.worksheets.map(ws => ws.name);
+  const sewingSheet = wsNames.find(n => n.includes('车缝明细'));
+  if (!sewingSheet) return [];
+
+  const ws = workbook.getWorksheet(sewingSheet);
+  const items = [];
+  let currentProductName = null;
+  let sortOrder = 0;
+
+  for (let row = 4; row <= 100; row++) {
+    const colI = strVal(ws.getCell(row, 9));
+    if (colI && colI.includes('合计')) break;
+
+    const colB = strVal(ws.getCell(row, 2));
+    const colC = strVal(ws.getCell(row, 3));
+    const colD = strVal(ws.getCell(row, 4));
+
+    // Product name row: B has value but C and D are empty
+    if (colB && !colC && !colD) {
+      currentProductName = colB;
+      continue;
+    }
+
+    if (!colC && !colD) continue;
+
+    items.push({
+      product_name: currentProductName,
+      fabric_name: colC,
+      position: colD,
+      cut_pieces: numVal(ws.getCell(row, 5)) ? Math.round(numVal(ws.getCell(row, 5))) : null,
+      usage_amount: numVal(ws.getCell(row, 6)),
+      material_price_rmb: numVal(ws.getCell(row, 7)),
+      price_rmb: numVal(ws.getCell(row, 8)),
+      markup_point: numVal(ws.getCell(row, 9)) || 1.15,
+      total_price_rmb: numVal(ws.getCell(row, 10)),
+      sort_order: sortOrder++,
+    });
+  }
+  return items;
 }
 
 // ─── Cost Items Parser ───────────────────────────────────────────────────────
@@ -416,6 +499,7 @@ async function parseWorkbook(filePath) {
     throw new Error(`Sheet "${sheetName}" not found in workbook`);
   }
 
+  const format = detectFormat(workbook);
   const header = parseHeader(ws);
 
   // If B1 doesn't look like a product number, try other sheets with "报价" in name
@@ -430,7 +514,13 @@ async function parseWorkbook(filePath) {
     }
   }
 
-  const moldParts = parseMoldParts(ws);
+  const moldStartRow = format === 'plush' ? 17 : 18;
+  const moldParts = parseMoldParts(ws, moldStartRow);
+
+  // Plush-specific parsing
+  const rotocastItems = format === 'plush' ? parseRotocastItems(ws) : [];
+  const sewingDetails = format === 'plush' ? parseSewingDetails(workbook) : [];
+
   const costItems = parseCostItems(ws);
   const summary = parseSummary(ws);
   const transport = parseTransport(ws);
@@ -438,6 +528,7 @@ async function parseWorkbook(filePath) {
   const paintingDetail = parsePainting(ws);
 
   return {
+    format_type: format,
     sheetName,
     product: {
       product_no: header.product_no,
@@ -448,6 +539,8 @@ async function parseWorkbook(filePath) {
     materialPrices: header.materialPrices,
     machinePrices: header.machinePrices,
     moldParts,
+    rotocastItems,
+    sewingDetails,
     hardwareItems: costItems.hardwareItems,
     laborItems: costItems.laborItems,
     packagingItems: costItems.packagingItems,
@@ -461,4 +554,4 @@ async function parseWorkbook(filePath) {
   };
 }
 
-module.exports = { parseWorkbook, detectLatestSheet };
+module.exports = { parseWorkbook, detectLatestSheet, detectFormat };
