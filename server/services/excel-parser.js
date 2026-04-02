@@ -506,7 +506,7 @@ function parsePainting(ws) {
 // Known non-hardware item name patterns — stop collecting when encountered
 const NON_HW_PATTERN = /搪胶|车缝|吊咭|留言纸|镭射|PE袋|胶针|扎带|平咭|外箱|印尼运费|包装辅料|生产夹具|拆货|围膜|合计|总计/;
 
-function parseHardwareSheet(workbook) {
+function parseHardwareSheet(workbook, mainWs) {
   // 1. Try dedicated 五金 sheet first
   const hwWs = workbook.getWorksheet('五金');
   if (hwWs && hwWs.rowCount > 0) {
@@ -525,8 +525,7 @@ function parseHardwareSheet(workbook) {
     if (items.length > 0) return items;
   }
 
-  // 2. Fallback: scan main sheet — only rows where col A explicitly = "五金"
-  const mainWs = workbook.worksheets[0];
+  // 2. Fallback: scan the active (latest) sheet — only rows where col A explicitly = "五金"
   if (!mainWs) return [];
 
   const items = [];
@@ -585,7 +584,7 @@ async function parseWorkbook(filePath) {
   // Plush-specific parsing
   const rotocastItems = format === 'plush' ? parseRotocastItems(ws) : [];
   const sewingDetails = format === 'plush' ? parseSewingDetails(workbook) : [];
-  const bodyAccessories = parseHardwareSheet(workbook);
+  const bodyAccessories = parseHardwareSheet(workbook, ws);
 
   const costItems = parseCostItems(ws);
   const summary = parseSummary(ws);
