@@ -433,44 +433,23 @@ function parseTransport(ws) {
 
 // ─── Electronics Parser ──────────────────────────────────────────────────────
 
-function parseElectronics(workbook) {
-  const wsNames = workbook.worksheets.map(ws => ws.name);
-  const elecSheet = wsNames.find(n => n === '电子' || n.includes('电子'));
-  if (!elecSheet) return { electronicItems: [], electronicSummary: null };
-
-  const ws = workbook.getWorksheet(elecSheet);
+function parseElectronics(workbook, mainWs) {
+  // Read from main sheet: rows where col A = "电子"
+  // Columns: A=label, B=part_name, C=quantity, D=old_price, E=new_price
   const electronicItems = [];
-
-  // R6-R35: component list (columns A=part_name, B=spec, C=quantity, D=unit_price_usd, E=total_usd, F=remark)
-  for (let r = 6; r <= 35; r++) {
-    const part_name = strVal(ws.getCell(r, 1));
-    if (!part_name) continue;
-    const spec = strVal(ws.getCell(r, 2));
-    const quantity = numVal(ws.getCell(r, 3));
-    const unit_price_usd = numVal(ws.getCell(r, 4));
-    const total_usd = numVal(ws.getCell(r, 5));
-    const remark = strVal(ws.getCell(r, 6));
-    electronicItems.push({ part_name, spec, quantity, unit_price_usd, total_usd, remark, sort_order: r - 6 });
+  if (mainWs) {
+    for (let r = 1; r <= mainWs.rowCount; r++) {
+      const row = mainWs.getRow(r);
+      const colA = strVal(row.getCell(1));
+      if (colA !== '电子') continue;
+      const part_name = strVal(row.getCell(2));
+      if (!part_name) continue;
+      const quantity = numVal(row.getCell(3));
+      const unit_price_usd = numVal(row.getCell(5)) ?? numVal(row.getCell(4));
+      electronicItems.push({ part_name, spec: null, quantity, unit_price_usd, total_usd: null, remark: null, sort_order: electronicItems.length });
+    }
   }
-
-  // Summary section (after component list)
-  const parts_cost = numVal(ws.getCell('D37')) || numVal(ws.getCell('E37'));
-  const bonding_cost = numVal(ws.getCell('D38')) || numVal(ws.getCell('E38'));
-  const smt_cost = numVal(ws.getCell('D39')) || numVal(ws.getCell('E39'));
-  const labor_cost = numVal(ws.getCell('D40')) || numVal(ws.getCell('E40'));
-  const test_cost = numVal(ws.getCell('D41')) || numVal(ws.getCell('E41'));
-  const packaging_transport = numVal(ws.getCell('D42')) || numVal(ws.getCell('E42'));
-  const total_cost = numVal(ws.getCell('D43')) || numVal(ws.getCell('E43'));
-  const profit_margin = numVal(ws.getCell('D44')) || numVal(ws.getCell('E44'));
-  const final_price_usd = numVal(ws.getCell('D45')) || numVal(ws.getCell('E45'));
-  const pcb_mold_cost_usd = numVal(ws.getCell('D46')) || numVal(ws.getCell('E46'));
-
-  const electronicSummary = {
-    parts_cost, bonding_cost, smt_cost, labor_cost, test_cost,
-    packaging_transport, total_cost, profit_margin, final_price_usd, pcb_mold_cost_usd,
-  };
-
-  return { electronicItems, electronicSummary };
+  return { electronicItems, electronicSummary: null };
 }
 
 // ─── Painting Parser ─────────────────────────────────────────────────────────
@@ -589,7 +568,7 @@ async function parseWorkbook(filePath) {
   const costItems = parseCostItems(ws);
   const summary = parseSummary(ws);
   const transport = parseTransport(ws);
-  const { electronicItems, electronicSummary } = parseElectronics(workbook);
+  const { electronicItems, electronicSummary } = parseElectronics(workbook, ws);
   const paintingDetail = parsePainting(ws);
 
   return {
