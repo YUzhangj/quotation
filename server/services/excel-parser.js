@@ -284,7 +284,7 @@ function parseSewingDetails(workbook) {
       position: colD,
       cut_pieces: numVal(ws.getCell(row, 5)) ? Math.round(numVal(ws.getCell(row, 5))) : null,
       usage_amount: numVal(ws.getCell(row, 6)),
-      material_price_rmb: ((numVal(ws.getCell(row, 7)) || 0) * 1.08),
+      material_price_rmb: Math.round((numVal(ws.getCell(row, 7)) || 0) * 1.08 * 100) / 100,
       price_rmb: numVal(ws.getCell(row, 8)),
       markup_point: numVal(ws.getCell(row, 9)) || 1.15,
       total_price_rmb: numVal(ws.getCell(row, 10)),
@@ -445,7 +445,7 @@ function parseElectronics(workbook, mainWs) {
       const part_name = strVal(row.getCell(2));
       if (!part_name) continue;
       const quantity = numVal(row.getCell(3));
-      const unit_price_usd = ((numVal(row.getCell(5)) || numVal(row.getCell(4)) || 0) * 1.08);
+      const unit_price_usd = Math.round((numVal(row.getCell(5)) || numVal(row.getCell(4)) || 0) * 1.08 * 100) / 100;
       electronicItems.push({ part_name, spec: null, quantity, unit_price_usd, total_usd: null, remark: null, sort_order: electronicItems.length });
     }
   }
@@ -517,7 +517,7 @@ function parseHardwareSheet(workbook, mainWs) {
     items.push({
       description: name,
       usage_qty: numVal(row.getCell(3)) ?? 1,
-      unit_price: ((numVal(row.getCell(5)) || numVal(row.getCell(4)) || 0) * 1.08),  // col E 样板报价，fallback col D 开模报价，×1.08
+      unit_price: Math.round((numVal(row.getCell(5)) || numVal(row.getCell(4)) || 0) * 1.08 * 100) / 100,  // col E 样板报价，fallback col D 开模报价，×1.08
       sort_order: items.length,
     });
   }
