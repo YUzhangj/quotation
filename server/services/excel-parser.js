@@ -7,7 +7,10 @@ function cellVal(cell) {
   const v = cell.value;
   if (v === null || v === undefined) return null;
   if (typeof v === 'object' && v.result !== undefined) return v.result; // formula
-  if (typeof v === 'object' && v.text !== undefined) return v.text;     // rich text
+  if (typeof v === 'object' && v.text !== undefined) return v.text;     // shared string
+  if (typeof v === 'object' && Array.isArray(v.richText)) {             // rich text
+    return v.richText.map(r => r.text || '').join('');
+  }
   return v;
 }
 
@@ -37,45 +40,46 @@ function detectFormat(workbook) {
 function detectLatestSheet(workbook) {
   const sheets = workbook.worksheets.map(ws => ws.name);
 
-  // Try to find sheets with "报价明细" prefix
-  const candidates = sheets.filter(n => n.includes('报价明细'));
-
-  if (candidates.length === 0) {
-    // Fallback: prefer sheets containing "报价" (e.g. "3K报价-印尼-260321")
-    const quoteCandidates = sheets.filter(n => n.includes('报价'));
-    if (quoteCandidates.length > 0) return quoteCandidates[0];
-    // Last resort: first sheet
-    return sheets[0];
-  }
-
-  if (candidates.length === 1) return candidates[0];
-
-  // Parse date/version suffix and pick the latest
+  // Extract trailing date/number from any sheet name for sorting
   function parseSheetDate(name) {
-    const suffix = name.replace(/.*报价明细[-\s]*/, '').trim();
-    // YYMMDD format e.g. "260310"
-    if (/^\d{6}$/.test(suffix)) {
-      return parseInt(suffix, 10);
-    }
-    // MMDD format e.g. "0725"
-    if (/^\d{4}$/.test(suffix)) {
-      return parseInt(suffix, 10);
-    }
-    // V2, V3 style
-    const vm = suffix.match(/^V(\d+)$/i);
+    const m = name.match(/(\d{6})$/);   // YYMMDD at end
+    if (m) return parseInt(m[1], 10);
+    const m2 = name.match(/(\d{4})$/);  // MMDD or sequence at end
+    if (m2) return parseInt(m2[1], 10);
+    const vm = name.match(/V(\d+)$/i);  // V2, V3 style
     if (vm) return parseInt(vm[1], 10);
     return 0;
   }
 
-  candidates.sort((a, b) => parseSheetDate(b) - parseSheetDate(a));
-  return candidates[0];
+  // Prefer "报价明细" sheets (injection format)
+  const mingxiCandidates = sheets.filter(n => n.includes('报价明细'));
+  if (mingxiCandidates.length > 0) {
+    mingxiCandidates.sort((a, b) => parseSheetDate(b) - parseSheetDate(a));
+    return mingxiCandidates[0];
+  }
+
+  // Fallback: any sheet containing "报价" — pick latest by date suffix
+  const quoteCandidates = sheets.filter(n => n.includes('报价'));
+  if (quoteCandidates.length > 0) {
+    quoteCandidates.sort((a, b) => parseSheetDate(b) - parseSheetDate(a));
+    return quoteCandidates[0];
+  }
+
+  // Last resort: first sheet
+  return sheets[0];
 }
 
 // ─── Header Parser (R1–R16) ───────────────────────────────────────────────────
 
-function parseHeader(ws) {
-  // R1: product_no in B1
-  const product_no = strVal(ws.getCell('B1'));
+function parseHeader(ws, format) {
+  // R1: product_no
+  // Injection: A1="产品编号：", B1=value
+  // Plush:     B1="产品编号：", C1=value
+  // Try B1 first; if it looks like a label, use C1
+  let product_no = strVal(ws.getCell('B1'));
+  if (!product_no || (typeof product_no === 'string' && product_no.includes('编号'))) {
+    product_no = strVal(ws.getCell('C1'));
+  }
 
   // R2-R6: Material price table
   // Row 2: 料型 labels (B2:V2)
@@ -109,18 +113,19 @@ function parseHeader(ws) {
   }
 
   // R11-R14: Exchange rates and params
-  // C11: hkd_rmb_quote, C12: hkd_rmb_check, C13: rmb_hkd, C14: hkd_usd
-  // F13: labor_hkd, F14: box_price_hkd
-  const hkd_rmb_quote = numVal(ws.getCell('C11'));
-  const hkd_rmb_check = numVal(ws.getCell('C12'));
-  const rmb_hkd = numVal(ws.getCell('C13'));
-  const hkd_usd = numVal(ws.getCell('C14'));
-  const labor_hkd = numVal(ws.getCell('F13'));
-  const box_price_hkd = numVal(ws.getCell('F14'));
+  // Injection: values at C11-C14; Plush: labels at C11-C14, values at D11-D14
+  // Try C first; if null try D (plush layout)
+  const hkd_rmb_quote = numVal(ws.getCell('C11')) || numVal(ws.getCell('D11'));
+  const hkd_rmb_check = numVal(ws.getCell('C12')) || numVal(ws.getCell('D12'));
+  const rmb_hkd = numVal(ws.getCell('C13')) || numVal(ws.getCell('D13'));
+  const hkd_usd = numVal(ws.getCell('C14')) || numVal(ws.getCell('D14'));
+  // Labor: F13 (injection) or G13 (plush); Box: F14 (injection) or G14 (plush, may be string)
+  const labor_hkd = numVal(ws.getCell('G13')) || numVal(ws.getCell('F13'));
+  const box_price_hkd = numVal(ws.getCell('G14')) || numVal(ws.getCell('F14'));
 
   // R15: date_code, R16: reference number
-  const date_code = strVal(ws.getCell('B15')) || strVal(ws.getCell('C15'));
-  const ref_no = strVal(ws.getCell('B16')) || strVal(ws.getCell('C16'));
+  const date_code = strVal(ws.getCell('A15')) || strVal(ws.getCell('B15')) || strVal(ws.getCell('C15'));
+  const ref_no = strVal(ws.getCell('A16')) || strVal(ws.getCell('B16')) || strVal(ws.getCell('C16'));
 
   return {
     product_no,
@@ -141,41 +146,47 @@ function parseMoldParts(ws, startRow = 18) {
   let row = startRow;
   let sortOrder = 0;
 
+  // Mold part columns are offset by 1 (col A is empty, data starts at col B=2)
+  // B=part_no, C=description, D=material, E=weight_g, F=unit_price, G=machine_type,
+  // H=cavity_count, I=sets_per_toy, J=target_qty, K=molding_labor, L=material_cost, M=mold_cost, N=remark
+  const C_PART   = 2,  C_DESC  = 3,  C_MAT  = 4,  C_WGHT = 5,
+        C_UPRICE = 6,  C_MACH = 7,  C_CAV  = 8,  C_SETS = 9,
+        C_TGT   = 10, C_MLBR = 11, C_MCST = 12, C_MCRMB = 13, C_REM  = 14;
+
   while (row <= 200) {
-    const colA = strVal(ws.getCell(row, 1));
-    const colC = strVal(ws.getCell(row, 3));
-    const colI = strVal(ws.getCell(row, 9));
+    const colB = strVal(ws.getCell(row, C_PART));
+    const colD = strVal(ws.getCell(row, C_MAT));
+    const colJ = strVal(ws.getCell(row, C_TGT));
 
     // Stop on 合计 row
     if (
-      (colA && colA.includes('合计')) ||
-      (colC && colC.includes('合计')) ||
-      (colI && colI.includes('合计'))
+      (colB && colB.includes('合计')) ||
+      (colD && colD.includes('合计')) ||
+      (colJ && colJ.includes('合计'))
     ) {
       break;
     }
 
     // Skip empty rows (no part_no and no description)
-    const part_no = strVal(ws.getCell(row, 1));
-    const description = strVal(ws.getCell(row, 2));
+    const part_no = strVal(ws.getCell(row, C_PART));
+    const description = strVal(ws.getCell(row, C_DESC));
 
     if (!part_no && !description) {
-      // Allow up to 3 consecutive empty rows before stopping
       row++;
       continue;
     }
 
-    const material = strVal(ws.getCell(row, 3));
-    const weight_g = numVal(ws.getCell(row, 4));
-    const unit_price_hkd_g = numVal(ws.getCell(row, 5));
-    const machine_type = strVal(ws.getCell(row, 6));
-    const cavity_count = numVal(ws.getCell(row, 7));
-    const sets_per_toy = numVal(ws.getCell(row, 8));
-    const target_qty = numVal(ws.getCell(row, 9));
-    const molding_labor = numVal(ws.getCell(row, 10));
-    const material_cost_hkd = numVal(ws.getCell(row, 11));
-    const mold_cost_rmb = numVal(ws.getCell(row, 12));
-    const remark = strVal(ws.getCell(row, 13));
+    const material = strVal(ws.getCell(row, C_MAT));
+    const weight_g = numVal(ws.getCell(row, C_WGHT));
+    const unit_price_hkd_g = numVal(ws.getCell(row, C_UPRICE));
+    const machine_type = strVal(ws.getCell(row, C_MACH));
+    const cavity_count = numVal(ws.getCell(row, C_CAV));
+    const sets_per_toy = numVal(ws.getCell(row, C_SETS));
+    const target_qty = numVal(ws.getCell(row, C_TGT));
+    const molding_labor = numVal(ws.getCell(row, C_MLBR));
+    const material_cost_hkd = numVal(ws.getCell(row, C_MCST));
+    const mold_cost_rmb = numVal(ws.getCell(row, C_MCRMB));
+    const remark = strVal(ws.getCell(row, C_REM));
 
     const is_old_mold = (remark && remark.includes('旧模')) || mold_cost_rmb === null ? 1 : 0;
 
@@ -213,21 +224,20 @@ function parseRotocastItems(ws) {
   let sortOrder = 0;
 
   while (row <= 40) {
-    const colA = strVal(ws.getCell(row, 1));
-    const colE = strVal(ws.getCell(row, 5));
-    if ((colA && colA.includes('合计')) || (colE && colE.includes('合计'))) break;
+    const colF = strVal(ws.getCell(row, 6));  // col F = 合计 label in template
+    if (colF && colF.includes('合计')) break;
 
-    const mold_no = strVal(ws.getCell(row, 1));
-    const name = strVal(ws.getCell(row, 2));
+    const mold_no = strVal(ws.getCell(row, 2));  // col B
+    const name = strVal(ws.getCell(row, 3));      // col C
     if (!mold_no && !name) { row++; continue; }
 
     items.push({
       mold_no, name,
-      output_qty: numVal(ws.getCell(row, 3)) ? Math.round(numVal(ws.getCell(row, 3))) : null,
-      usage_pcs: numVal(ws.getCell(row, 4)) ? Math.round(numVal(ws.getCell(row, 4))) : null,
-      unit_price_hkd: numVal(ws.getCell(row, 5)),
-      total_hkd: numVal(ws.getCell(row, 6)),
-      remark: strVal(ws.getCell(row, 7)),
+      output_qty: numVal(ws.getCell(row, 4)) ? Math.round(numVal(ws.getCell(row, 4))) : null,
+      usage_pcs: numVal(ws.getCell(row, 5)) ? Math.round(numVal(ws.getCell(row, 5))) : null,
+      unit_price_hkd: numVal(ws.getCell(row, 6)),
+      total_hkd: numVal(ws.getCell(row, 7)),
+      remark: strVal(ws.getCell(row, 8)),
       sort_order: sortOrder++,
     });
     row++;
@@ -245,6 +255,7 @@ function parseSewingDetails(workbook) {
   const ws = workbook.getWorksheet(sewingSheet);
   const items = [];
   let currentProductName = null;
+  let lastFabricName = null;
   let sortOrder = 0;
 
   for (let row = 4; row <= 100; row++) {
@@ -263,9 +274,13 @@ function parseSewingDetails(workbook) {
 
     if (!colC && !colD) continue;
 
+    // Inherit fabric_name from previous row if merged cell left it empty
+    if (colC) lastFabricName = colC;
+    const fabricName = colC || lastFabricName;
+
     items.push({
       product_name: currentProductName,
-      fabric_name: colC,
+      fabric_name: fabricName,
       position: colD,
       cut_pieces: numVal(ws.getCell(row, 5)) ? Math.round(numVal(ws.getCell(row, 5))) : null,
       usage_amount: numVal(ws.getCell(row, 6)),
@@ -486,6 +501,51 @@ function parsePainting(ws) {
   };
 }
 
+// ─── Hardware Sheet Parser (五金 sheet or main sheet section → BodyAccessory) ──
+
+// Known non-hardware item name patterns — stop collecting when encountered
+const NON_HW_PATTERN = /搪胶|车缝|吊咭|留言纸|镭射|PE袋|胶针|扎带|平咭|外箱|印尼运费|包装辅料|生产夹具|拆货|围膜|合计|总计/;
+
+function parseHardwareSheet(workbook) {
+  // 1. Try dedicated 五金 sheet first
+  const hwWs = workbook.getWorksheet('五金');
+  if (hwWs && hwWs.rowCount > 0) {
+    const items = [];
+    hwWs.eachRow((row, rowNum) => {
+      if (rowNum < 2) return;
+      const name = strVal(row.getCell(1));
+      if (!name || name === '名称' || name === '五金') return;
+      items.push({
+        description: name,
+        usage_qty: numVal(row.getCell(2)) ?? 1,
+        unit_price: numVal(row.getCell(3)) ?? 0,
+        sort_order: items.length,
+      });
+    });
+    if (items.length > 0) return items;
+  }
+
+  // 2. Fallback: scan main sheet — only rows where col A explicitly = "五金"
+  const mainWs = workbook.worksheets[0];
+  if (!mainWs) return [];
+
+  const items = [];
+  for (let r = 1; r <= mainWs.rowCount; r++) {
+    const row = mainWs.getRow(r);
+    const colA = strVal(row.getCell(1));
+    if (colA !== '五金') continue;
+    const name  = strVal(row.getCell(2));
+    if (!name) continue;
+    items.push({
+      description: name,
+      usage_qty: numVal(row.getCell(3)) ?? 1,
+      unit_price: numVal(row.getCell(4)) ?? 0,
+      sort_order: items.length,
+    });
+  }
+  return items;
+}
+
 // ─── Main Parse Function ─────────────────────────────────────────────────────
 
 async function parseWorkbook(filePath) {
@@ -500,17 +560,22 @@ async function parseWorkbook(filePath) {
   }
 
   const format = detectFormat(workbook);
-  const header = parseHeader(ws);
+  const header = parseHeader(ws, format);
 
-  // If B1 doesn't look like a product number, try other sheets with "报价" in name
-  if (!header.product_no || header.product_no.length > 30 || header.product_no.includes('明细表')) {
-    for (const otherWs of workbook.worksheets) {
-      if (otherWs.name === ws.name) continue;
-      const b1 = strVal(otherWs.getCell('B1'));
-      if (b1 && b1.length <= 30 && !b1.includes('明细表')) {
-        header.product_no = b1;
-        break;
-      }
+  // Fall back to sheet name only if B1 is empty
+  if (!header.product_no) {
+    header.product_no = sheetName;
+  }
+
+  // Use sheet name date if it's newer than the date_code from cell A15/B15/C15
+  // e.g. sheet "报价明细-260310" → "20260310", overrides stale cell value "20250207"
+  const sheetDateMatch = sheetName.match(/(\d{6,8})/);
+  if (sheetDateMatch) {
+    const sheetDate = sheetDateMatch[1].length === 6 ? '20' + sheetDateMatch[1] : sheetDateMatch[1];
+    const cellDateMatch = (header.date_code || '').match(/\d{6,8}/);
+    const cellDate = cellDateMatch ? (cellDateMatch[0].length === 6 ? '20' + cellDateMatch[0] : cellDateMatch[0]) : '0';
+    if (sheetDate > cellDate) {
+      header.date_code = sheetDate;
     }
   }
 
@@ -520,6 +585,7 @@ async function parseWorkbook(filePath) {
   // Plush-specific parsing
   const rotocastItems = format === 'plush' ? parseRotocastItems(ws) : [];
   const sewingDetails = format === 'plush' ? parseSewingDetails(workbook) : [];
+  const bodyAccessories = parseHardwareSheet(workbook);
 
   const costItems = parseCostItems(ws);
   const summary = parseSummary(ws);
@@ -541,6 +607,7 @@ async function parseWorkbook(filePath) {
     moldParts,
     rotocastItems,
     sewingDetails,
+    bodyAccessories,
     hardwareItems: costItems.hardwareItems,
     laborItems: costItems.laborItems,
     packagingItems: costItems.packagingItems,
