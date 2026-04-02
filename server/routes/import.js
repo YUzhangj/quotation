@@ -37,13 +37,32 @@ router.post('/', upload.single('file'), async (req, res) => {
       product = { id: r.lastInsertRowid, item_no: productNo };
     }
 
-    // ── Create QuoteVersion ────────────────────────────────────────────────
-    const versionName = data.product.date_code || data.sheetName;
-    const vr = db.prepare(
-      `INSERT INTO QuoteVersion (product_id, version_name, source_sheet, date_code, quote_date, status, format_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`
-    ).run(product.id, versionName, data.sheetName, data.product.date_code, data.product.date_code, data.format_type || 'injection', now, now);
-    const versionId = vr.lastInsertRowid;
+    // ── Create QuoteVersion (or reuse existing with same source_sheet) ───────
+    // Use sheet name as version identifier (more reliable than internal date)
+    const versionName = data.sheetName;
+    let versionId;
+    const existingVersion = db.prepare(
+      'SELECT id FROM QuoteVersion WHERE product_id = ? AND source_sheet = ?'
+    ).get(product.id, data.sheetName);
+
+    if (existingVersion) {
+      // Delete old data and re-import fresh
+      versionId = existingVersion.id;
+      const tables = ['QuoteParams','MaterialPrice','MachinePrice','MoldPart','HardwareItem',
+        'PackagingItem','ElectronicItem','ElectronicSummary','PaintingDetail','TransportConfig',
+        'MoldCost','RawMaterial','BodyAccessory','SewingDetail','RotocastItem','ProductDimension'];
+      for (const t of tables) {
+        db.prepare(`DELETE FROM ${t} WHERE version_id = ?`).run(versionId);
+      }
+      db.prepare(`UPDATE QuoteVersion SET version_name=?, date_code=?, quote_date=?, format_type=?, updated_at=? WHERE id=?`)
+        .run(data.product.date_code, data.product.date_code, data.product.date_code, data.format_type || 'injection', now, versionId);
+    } else {
+      const vr = db.prepare(
+        `INSERT INTO QuoteVersion (product_id, version_name, source_sheet, date_code, quote_date, status, format_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`
+      ).run(product.id, data.product.date_code, data.sheetName, data.product.date_code, data.product.date_code, data.format_type || 'injection', now, now);
+      versionId = vr.lastInsertRowid;
+    }
 
     // ── Insert all data in a transaction ──────────────────────────────────
     const insertAll = db.transaction(() => {
@@ -201,20 +220,45 @@ router.post('/', upload.single('file'), async (req, res) => {
           insertRaw.run(versionId, 'plastic', matName, null, weight, pricePerKg, sortIdx++);
         }
 
-        // Fabric from sewingDetails: rows with both fabric_name and position are fabric cuts
-        const fabricMap = new Map();
+        // Alloy: always insert fixed ZINC ALLOY + ALUMINUM rows
+        insertRaw.run(versionId, 'alloy', 'ZINC ALLOY', null, null, null, sortIdx++);
+        insertRaw.run(versionId, 'alloy', 'ALUMINUM', null, null, null, sortIdx++);
+
+        // Fabric from sewingDetails: only rows with both fabric_name and position
+        // Formula: HK$/YD = 物料价(RMB) × 码点 × 1.05 ÷ 港币兑人民币
+        const hkdRmb = (p.hkd_rmb_quote && p.hkd_rmb_quote > 0) ? p.hkd_rmb_quote : 0.85;
+        console.log('[import] sewingDetails count:', (data.sewingDetails || []).length, 'hkd_rmb_quote:', p.hkd_rmb_quote, '=> hkdRmb:', hkdRmb);
         for (const s of (data.sewingDetails || [])) {
           if (!s.fabric_name || !s.position) continue;
-          const key = s.fabric_name.trim();
-          const existing = fabricMap.get(key);
-          if (existing) {
-            existing.usage += (s.usage_amount || 0);
-          } else {
-            fabricMap.set(key, { usage: s.usage_amount || 0, price: s.material_price_rmb });
-          }
+          const usageRounded = s.usage_amount != null ? Math.round(s.usage_amount * 10000) / 10000 : 0;
+          const markupPoint = s.markup_point || 1.15;
+          const priceHkd = s.material_price_rmb != null
+            ? Math.round(s.material_price_rmb * markupPoint * 1.05 / hkdRmb * 10000) / 10000
+            : null;
+          console.log('[import] fabric:', s.fabric_name, s.position, 'rmb:', s.material_price_rmb, 'markup:', markupPoint, '=> hkd:', priceHkd);
+          insertRaw.run(versionId, 'fabric', s.fabric_name, s.position, usageRounded, priceHkd, sortIdx++);
         }
-        for (const [fabricName, { usage, price }] of fabricMap) {
-          insertRaw.run(versionId, 'fabric', fabricName, null, usage, price, sortIdx++);
+
+        // Sewing detail rows with fabric_name but no position → BD Purchase Parts
+        const insertHwSew = db.prepare(
+          `INSERT INTO HardwareItem (version_id, name, quantity, old_price, new_price, difference, tax_type, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        let hwSewIdx = (data.hardwareItems || []).length;
+        for (const s of (data.sewingDetails || [])) {
+          if (!s.fabric_name || s.position) continue;
+          insertHwSew.run(versionId, s.fabric_name, s.usage_amount || null, null, s.price_rmb || null, null, null, hwSewIdx++);
+        }
+      }
+
+      // BodyAccessory (from 五金 sheet)
+      if (data.bodyAccessories && data.bodyAccessories.length > 0) {
+        const insertBA = db.prepare(
+          `INSERT INTO BodyAccessory (version_id, description, usage_qty, unit_price, sort_order)
+           VALUES (?, ?, ?, ?, ?)`
+        );
+        for (const ba of data.bodyAccessories) {
+          insertBA.run(versionId, ba.description, ba.usage_qty, ba.unit_price, ba.sort_order);
         }
       }
 
