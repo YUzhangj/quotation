@@ -6,7 +6,8 @@ const ExcelJS = require('exceljs');
 const path = require('path');
 const { getDb } = require('./db');
 
-const TEMPLATE_PATH = path.join(__dirname, '../templates/VQ-template.xlsx');
+const TEMPLATE_PATH       = path.join(__dirname, '../templates/VQ-template.xlsx');
+const TEMPLATE_PATH_PLUSH = path.join(__dirname, '../templates/VQ-template-plush.xlsx');
 
 // ─── Load all version data from DB ───────────────────────────────────────────
 
@@ -30,10 +31,20 @@ function loadData(versionId) {
     machinePrices:  db.prepare('SELECT * FROM MachinePrice  WHERE version_id = ? ORDER BY id').all(versionId),
     bodyAccessories:db.prepare('SELECT * FROM BodyAccessory WHERE version_id = ? ORDER BY sort_order').all(versionId),
     rawMaterials:   db.prepare('SELECT * FROM RawMaterial WHERE version_id = ? ORDER BY sort_order').all(versionId),
+    sewingItems:    db.prepare("SELECT * FROM SewingDetail WHERE version_id = ? AND (position IS NULL OR position = '') ORDER BY sort_order").all(versionId),
+    sewingLaborItems: db.prepare("SELECT * FROM SewingDetail WHERE version_id = ? AND position = '__labor__' ORDER BY sort_order").all(versionId),
+    assemblyLaborItems: db.prepare("SELECT * FROM HardwareItem WHERE version_id = ? AND part_category = 'labor_assembly' ORDER BY sort_order").all(versionId),
+    rotocastItems:  db.prepare('SELECT * FROM RotocastItem WHERE version_id = ? ORDER BY sort_order').all(versionId),
   };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Bilingual name: "中文 / English" when eng_name exists, otherwise just Chinese
+function biName(zh, eng) {
+  if (eng && eng.trim()) return `${zh || ''} / ${eng.trim()}`;
+  return zh || '';
+}
 
 // Round a numeric value to 2 decimal places (for monetary amounts)
 function r2(v) {
@@ -91,7 +102,7 @@ function fillVQ(ws, d) {
   bodyAccessories.slice(0, 5).forEach((acc, i) => {
     const r = 12 + i;
     setVal(ws, r, 1, acc.part_no || '');
-    setVal(ws, r, 2, acc.description || '');
+    setVal(ws, r, 2, biName(acc.description, acc.eng_name));
     setVal(ws, r, 5, parseInt(acc.moq) || 2500);
     setVal(ws, r, 6, parseFloat(acc.usage_qty) || 1);
     setVal(ws, r, 7, r2(acc.unit_price) || 0);
@@ -105,7 +116,7 @@ function fillVQ(ws, d) {
   const moq = params.moq_default || 2500;
   packagingItems.slice(0, PKG_END - PKG_START + 1).forEach((item, i) => {
     const r = PKG_START + i;
-    setVal(ws, r, 2, item.name || '');
+    setVal(ws, r, 2, biName(item.name, item.eng_name));
     setVal(ws, r, 3, item.remark || '');    // specifications / remark
     setVal(ws, r, 5, moq);
     setVal(ws, r, 6, item.quantity || 1);
@@ -139,7 +150,7 @@ function fillVQ(ws, d) {
 
 function fillBCD(ws, d) {
   const { version, product, params, moldParts, hardwareItems, electronicItems,
-          paintingDetail, materialPrices, rawMaterials } = d;
+          paintingDetail, materialPrices, rawMaterials, bodyAccessories, sewingItems, sewingLaborItems, assemblyLaborItems, rotocastItems } = d;
 
   // ── Header (row 7) ─────────────────────────────────────────────────────────
   setVal(ws, 7, 1, version.body_no || '');
@@ -167,15 +178,43 @@ function fillBCD(ws, d) {
   const fabrics  = (rawMaterials || []).filter(m => m.category === 'fabric');
 
   // Helper: fill a range of rows with raw material items
+  // Force-clear a range including shared formula metadata, then write formula to col 6
+  function forceWriteFormula(r, col, formula, result) {
+    const cell = ws.getCell(r, col);
+    cell.value = null;
+    if (cell._value && cell._value._type !== undefined) cell._value._type = 0;
+    delete cell._sharedFormula;
+    cell.value = { formula, result: result ?? 0 };
+  }
+
   function fillMatRows(items, startRow, endRow, hasSpec) {
-    const cols = hasSpec ? [2, 3, 4, 5] : [2, 4, 5];
-    clearRows(ws, startRow, endRow, cols);
+    // Force-clear cols 2-6 including formula cells and shared formula metadata
+    for (let r = startRow; r <= endRow; r++) {
+      for (let c = 2; c <= 6; c++) {
+        const cell = ws.getCell(r, c);
+        cell.value = null;
+        if (cell._value && cell._value._type !== undefined) cell._value._type = 0;
+        delete cell._sharedFormula;
+      }
+    }
     items.slice(0, endRow - startRow + 1).forEach((m, i) => {
       const r = startRow + i;
-      setVal(ws, r, 2, m.material_name || '');
-      if (hasSpec) setVal(ws, r, 3, m.spec || '');
-      setVal(ws, r, 4, parseFloat(m.weight_g) || null);
-      setVal(ws, r, 5, r2(m.unit_price_per_kg));
+      setVal(ws, r, 2, biName(m.material_name, m.eng_name));
+      const usage = parseFloat(m.weight_g) || 0;
+      const price = parseFloat(m.unit_price_per_kg) || 0;
+      if (hasSpec) {
+        // Fabric: usage in pcs, price per pcs → Amount = D*E
+        const posText = m.spec_eng && m.spec_eng !== m.spec ? `${m.spec || ''} / ${m.spec_eng}` : (m.spec || '');
+        setVal(ws, r, 3, posText);
+        setVal(ws, r, 4, usage || null);
+        setVal(ws, r, 5, r2(price));
+        forceWriteFormula(r, 6, `D${r}*E${r}`, r2(usage * price));
+      } else {
+        // Plastic/Alloy: usage in grams, price per KG → Amount = ROUND(D*E/1000,3)
+        setVal(ws, r, 4, usage || null);
+        setVal(ws, r, 5, r2(price));
+        forceWriteFormula(r, 6, `ROUND(D${r}*E${r}/1000,3)`, r2(usage * price / 1000));
+      }
     });
   }
 
@@ -186,100 +225,326 @@ function fillBCD(ws, d) {
   // 3. Fabric R43–R55 (formula: =D*E, has spec/position in col C)
   fillMatRows(fabrics, 43, 55, true);
 
-  // ── Section B: Molding Labour (rows 67–90 = injection molding data) ────────
-  const MOLD_START = 67, MOLD_END = 90;
-  clearRows(ws, MOLD_START, MOLD_END, [1, 2, 3, 4, 5]);
+  // ── Section B1: Injection Molding (rows 67–86) ──────────────────────────────
+  const MOLD_START = 67, MOLD_END = 86;
+  // Clear ALL cells — must splice shared formula metadata to prevent ExcelJS
+  // from re-expanding F68:F86 shared formula over E column on file open
+  for (let r = MOLD_START; r <= MOLD_END; r++) {
+    for (let c = 1; c <= 7; c++) {
+      const cell = ws.getCell(r, c);
+      cell.value = null;
+      // Force-clear any shared formula reference that ExcelJS preserves in memory
+      if (cell._value && cell._value._type !== undefined) cell._value._type = 0;
+      delete cell._sharedFormula;
+    }
+  }
 
   moldParts.slice(0, MOLD_END - MOLD_START + 1).forEach((part, i) => {
     const r = MOLD_START + i;
     const setsPerToy  = parseFloat(part.sets_per_toy) || 1;
-    const shots = setsPerToy > 0 ? 1 / setsPerToy : 1;   // Shot/Toy = 1 ÷ 出模套数
+    const shots = setsPerToy > 0 ? 1 / setsPerToy : 1;
     const laborPerToy = parseFloat(part.molding_labor) || 0;
-    const costPerShot = r2(laborPerToy * setsPerToy);   // Cost/Shot = 啤工 × 出模套数
-
-    setVal(ws, r, 1, part.part_no || '');
-    setVal(ws, r, 2, part.description || '');
-    setVal(ws, r, 3, part.machine_type || '');
-    setVal(ws, r, 4, shots);
-    setVal(ws, r, 5, r2(costPerShot));
-    // F col = formula =D*E — not touched (already in template)
+    const costPerShot = r2(laborPerToy * setsPerToy * 1.08);
+    ws.getCell(r, 1).value = part.part_no || '';
+    ws.getCell(r, 2).value = biName(part.description, part.eng_name);
+    ws.getCell(r, 3).value = part.machine_type || '';
+    ws.getCell(r, 4).value = shots;
+    ws.getCell(r, 5).value = r2(costPerShot);
+    forceWriteFormula(r, 6, `D${r}*E${r}`, r2(shots * costPerShot));
   });
 
+  // Delete extra empty rows in injection section — keep only 3 blank rows after data
+  const KEEP_BLANK = 3;
+  const injDataEnd = MOLD_START + moldParts.length - 1;
+  const injKeepEnd = injDataEnd + KEEP_BLANK;
+  const injDeleteStart = injKeepEnd + 1;
+  const injDeleteCount = MOLD_END - injKeepEnd;
+  if (injDeleteCount > 0) ws.spliceRows(injDeleteStart, injDeleteCount);
+  const injShift = injDeleteCount > 0 ? injDeleteCount : 0;
+
+  // ── Section B2: Blow Molding / Rotocast (row 90 shifted up by deleted rows) ──
+  const BLOW_TEMPLATE_ROW = 90 - injShift;
+  const BLOW_SUBTOTAL_ROW = 91 - injShift;
+  const rotoList = (rotocastItems || []).filter(r =>
+    r.mold_no && /^[A-Za-z]+\d+/.test(r.mold_no.trim())
+  );
+
+  // Insert extra rows before subtotal if more than 1 item
+  const rotoExtra = Math.max(0, rotoList.length - 1);
+  for (let i = 0; i < rotoExtra; i++) {
+    ws.insertRow(BLOW_SUBTOTAL_ROW + i, [], 'i+');
+  }
+
+  // Clear + fill blow molding rows
+  for (let i = 0; i < Math.max(1, rotoList.length); i++) {
+    const r = BLOW_TEMPLATE_ROW + i;
+    if (i < rotoList.length) {
+      const item = rotoList[i];
+      const usagePcs   = parseInt(item.usage_pcs) || 1;
+      // 单价(HK$) = unit_price_hkd × 1.08 (matches UI display)
+      const unitPrice  = r2((parseFloat(item.unit_price_hkd) || 0) * 1.08);
+      setVal(ws, r, 1, item.mold_no || '');
+      setVal(ws, r, 2, item.name || '');
+      setVal(ws, r, 3, '');
+      setVal(ws, r, 4, usagePcs);                    // Shot/Toy = 用量
+      setVal(ws, r, 5, unitPrice);                   // Cost/Shot = unit_price_hkd × 1.08
+      forceWriteFormula(r, 6, `D${r}*E${r}`, r2(usagePcs * unitPrice));
+    } else {
+      for (let c = 1; c <= 7; c++) ws.getCell(r, c).value = null;
+    }
+  }
+
+  // All sections below shift by: rotoExtra inserted rows - injShift deleted rows
+  const blowShift = rotoExtra - injShift;
+
   // ── Section C: Electronics (rows 101–103) ──────────────────────────────────
-  const ELEC_START = 101, ELEC_END = 103;
+  const ELEC_START = 101 + blowShift, ELEC_END = 103 + blowShift;
   clearRows(ws, ELEC_START, ELEC_END, [2, 3, 4, 5]);
 
   electronicItems.slice(0, ELEC_END - ELEC_START + 1).forEach((item, i) => {
     const r = ELEC_START + i;
-    setVal(ws, r, 2, item.part_name || '');
+    setVal(ws, r, 2, biName(item.part_name, item.eng_name));
     setVal(ws, r, 3, 'pc');
     setVal(ws, r, 4, parseFloat(item.quantity) || 1);
     setVal(ws, r, 5, r2(item.unit_price_usd) || 0);
     // F col = formula =E*D — not touched
   });
 
-  // ── Section C: Other Hardware (rows 113–134) ───────────────────────────────
-  const HW_START = 113, HW_END = 134;
-  clearRows(ws, HW_START, HW_END, [2, 3, 4, 5]);
+  // ── Section C2: Sewing Accessories (rows 106–110, insert extra rows if needed) ──
+  const SEW_START = 106 + blowShift, SEW_TEMPLATE_END = 110 + blowShift;
+  const hkdRmb = parseFloat(params.rmb_hkd) || 0.85;
+  const sewList = sewingItems || [];
+  const baList  = bodyAccessories || [];
 
-  hardwareItems.slice(0, HW_END - HW_START + 1).forEach((item, i) => {
-    const r = HW_START + i;
-    setVal(ws, r, 2, item.name || '');
-    setVal(ws, r, 3, 'pc');
-    setVal(ws, r, 4, parseFloat(item.quantity) || 1);
-    setVal(ws, r, 5, r2(item.new_price) || 0);
-    // F col = formula =D*E — not touched
+  // Insert extra rows before row 111 (shifts everything down safely)
+  const sewExtra = Math.max(0, sewList.length - (SEW_TEMPLATE_END - SEW_START + 1));
+  for (let i = 0; i < sewExtra; i++) {
+    ws.insertRow(SEW_TEMPLATE_END + 1, [], 'i+');
+  }
+  const SEW_END = SEW_TEMPLATE_END + sewExtra;
+
+  // Clear + fill sewing rows
+  clearRows(ws, SEW_START, SEW_END, [2, 3, 4, 5]);
+  sewList.forEach((item, i) => {
+    const r = SEW_START + i;
+    const priceHkd = hkdRmb > 0 ? (parseFloat(item.total_price_rmb) || 0) / hkdRmb : 0;
+    const usage = parseFloat(item.usage_amount) || 1;
+    ws.getCell(r, 2).value = biName(item.fabric_name, item.eng_name);
+    ws.getCell(r, 3).value = 'pc';
+    ws.getCell(r, 4).value = usage;
+    ws.getCell(r, 5).value = r2(priceHkd);
+    forceWriteFormula(r, 6, `D${r}*E${r}`, r2(usage * priceHkd));
   });
 
-  // ── Section E: Decoration (row 153) ────────────────────────────────────────
+  // ── Section C3: Other Components (body accessories) ──────────────────────────
+  // Template rows: 113-135 (data rows 113-116 have correct formulas; 117-135
+  // are =F{prev} placeholders). We force-clear all 23 rows and write our data.
+  const totalShift = blowShift + sewExtra;
+  const C3_DATA_START = 113 + totalShift;
+  const C3_SLOTS = 23;     // rows 113-135 in original template
+  const C3_GAP = 3;        // always leave 3 empty rows before subtotal
+  const c3Extra = Math.max(0, baList.length + C3_GAP - C3_SLOTS);
+  // Insert extra rows before the subtotal row (C3_DATA_START + C3_SLOTS)
+  for (let i = 0; i < c3Extra; i++) {
+    ws.insertRow(C3_DATA_START + C3_SLOTS + i, [], 'i+');
+  }
+  const C3_TOTAL = C3_SLOTS + c3Extra;
+
+  // Force-clear cols 2-6 (incl. formula cells and shared formula metadata)
+  for (let r = C3_DATA_START; r < C3_DATA_START + C3_TOTAL; r++) {
+    for (let c = 2; c <= 6; c++) {
+      const cell = ws.getCell(r, c);
+      cell.value = null;
+      if (cell._value && cell._value._type !== undefined) cell._value._type = 0;
+      delete cell._sharedFormula;
+    }
+  }
+  baList.forEach((item, i) => {
+    const r = C3_DATA_START + i;
+    const usage = parseFloat(item.usage_qty) ?? 0;
+    const price = r2(item.unit_price) || 0;
+    ws.getCell(r, 2).value = biName(item.description, item.eng_name);
+    ws.getCell(r, 3).value = 'pc';
+    ws.getCell(r, 4).value = usage;
+    ws.getCell(r, 5).value = price;
+    forceWriteFormula(r, 6, `D${r}*E${r}`, r2(usage * price));
+  });
+
+  // ── Section E: E. OTHER LABOUR & PROCESS ─────────────────────────────────────
+  // Template (base rows, before shift):
+  //   R153: 1. DECORATION — Spraying row (No.of process D, Unit Cost E)
+  //   R162: 4. SEWING header row
+  //   R163: Sewing labor data row (No.of process D, Unit Cost E)  ← sub-total formula at 163
+  //   R165: ASSEMBLY row (No.of process D, Unit Cost E)
+  //   R166: Plush labour row
+  //   R167: BONDING row
+  const eShift = totalShift + c3Extra;
+
+  // 1. DECORATION (row 153) — Spraying: use painting detail
   if (paintingDetail) {
     const sprayOps = parseInt(paintingDetail.spray_count) || 0;
     const laborPerOp = sprayOps > 0
       ? (parseFloat(paintingDetail.labor_cost_hkd) || 0) / sprayOps
       : 0;
-    setVal(ws, 153, 4, sprayOps || null);
-    setVal(ws, 153, 5, r2(laborPerOp));
-    // F153 = formula =E153*D153 — not touched
+    setVal(ws, 153 + eShift, 4, sprayOps || null);
+    setVal(ws, 153 + eShift, 5, r2(laborPerOp));
   }
 
-  // ── Section E: Assembly (row 165) ──────────────────────────────────────────
-  // Assembly hours from labor_hkd param (hourly rate) — use a default assembly op
-  const assemblyHours = parseFloat(params.assembly_hours) || null;
-  const laborRate = parseFloat(params.labor_hkd) || null;
-  setVal(ws, 165, 4, assemblyHours);
-  setVal(ws, 165, 5, r2(laborRate));
+  // 4. SEWING (row 162-163) — car sewing labour from SewingDetail position='__labor__'
+  const sewLaborList = sewingLaborItems || [];
+  if (sewLaborList.length > 0) {
+    const sewItem = sewLaborList[0];
+    const hkdRmbRate = parseFloat(params.rmb_hkd) || 0.85;
+    const sewLaborHkd = hkdRmbRate > 0 ? (parseFloat(sewItem.total_price_rmb) || 0) / hkdRmbRate : 0;
+    // Row 162 = SEWING category header; row 163 = data (Sewing labor)
+    const sewUnitCostHkd = hkdRmbRate > 0 ? (parseFloat(sewItem.material_price_rmb) || 0) / hkdRmbRate : 0;
+    setVal(ws, 163 + eShift, 4, parseFloat(sewItem.usage_amount) || null);
+    setVal(ws, 163 + eShift, 5, r2(sewUnitCostHkd));
+  }
+
+  // 5. OTHERS — Assembly labour from HardwareItem part_category='labor_assembly'
+  const asmList = assemblyLaborItems || [];
+  // Find assembly item (装配) for row 165, sum all others into row 166 (Plush labour = general)
+  const asmItem = asmList.find(h => (h.name || '').includes('装配')) || asmList[0];
+  if (asmItem) {
+    setVal(ws, 165 + eShift, 4, parseFloat(asmItem.quantity) || null);
+    setVal(ws, 165 + eShift, 5, r2(parseFloat(asmItem.new_price) || 0));
+  }
+}
+
+// ─── Fill Plush Template (3K报价 format) ──────────────────────────────────────
+
+function fillPlush(ws, d) {
+  const { version, product, params, moldParts, rotocastItems } = d;
+
+  // ── Product info ──
+  ws.getCell('C1').value = product ? `${product.item_no || ''}-${product.item_desc || ''}` : '';
+  ws.getCell('B15').value = version.quote_date ? `日期:${version.quote_date.slice(0, 10).replace(/-/g, '.')}` : '';
+
+  // ── Exchange rate params (rows 11-14) ──
+  if (params.hkd_rmb_quote) ws.getCell('D11').value = parseFloat(params.hkd_rmb_quote);
+  if (params.hkd_rmb_check) ws.getCell('D12').value = parseFloat(params.hkd_rmb_check);
+  if (params.rmb_hkd)       ws.getCell('D13').value = parseFloat(params.rmb_hkd);
+  if (params.hkd_usd)       ws.getCell('D14').value = parseFloat(params.hkd_usd);
+  if (params.labor_hkd)     ws.getCell('G13').value = parseFloat(params.labor_hkd);
+
+  // ── Section: Injection Mold (row 17+) ────────────────────────────────────────
+  const INJ_TEMPLATE_ROW = 17;
+  const injList = moldParts || [];
+
+  // Insert extra rows if more than 1 injection part
+  for (let i = 1; i < injList.length; i++) {
+    ws.insertRow(INJ_TEMPLATE_ROW + i, [], 'i+');
+  }
+  const injCount = Math.max(1, injList.length);
+
+  // Clear + fill injection rows
+  injList.forEach((part, i) => {
+    const r = INJ_TEMPLATE_ROW + i;
+    if (i === 0) ws.getCell(r, 1).value = '注塑模具';
+    else ws.getCell(r, 1).value = null;
+    ws.getCell(r, 2).value = part.part_no || '';
+    ws.getCell(r, 3).value = biName(part.description, part.eng_name);
+    ws.getCell(r, 4).value = part.material || '';
+    ws.getCell(r, 5).value = parseFloat(part.weight_g) || null;
+    // Col F (price/g) — formula references material lookup table, keep as-is for row 17
+    // For inserted rows write directly
+    if (i > 0) ws.getCell(r, 6).value = parseFloat(part.unit_price_hkd_g) || null;
+    ws.getCell(r, 7).value = part.machine_type || '';
+    ws.getCell(r, 8).value = parseInt(part.cavity_count) || null;
+    ws.getCell(r, 9).value = parseInt(part.sets_per_toy) || null;
+    ws.getCell(r, 10).value = parseInt(part.target_qty) || null;
+    // Col K (molding labor) — formula, keep for row 17; write directly for inserted rows
+    if (i > 0) ws.getCell(r, 11).value = r2(part.molding_labor);
+    // Col L (material cost) — formula, keep for row 17; write directly for inserted rows
+    if (i > 0) ws.getCell(r, 12).value = r2(part.material_cost_hkd);
+    ws.getCell(r, 13).value = r2(part.mold_cost_rmb);
+    ws.getCell(r, 14).value = part.remark || '';
+  });
+
+  // ── Section: Rotocast / Blow Molding (row 21+, shifted by extra inj rows) ──
+  const ROTO_TEMPLATE_START = 21;
+  const rotoList = (rotocastItems || []).filter(r =>
+    r.mold_no && /^[A-Za-z]+\d+/.test(r.mold_no.trim())
+  );
+  const rotoShift = injCount - 1; // rows shifted due to injection inserts
+  const ROTO_START = ROTO_TEMPLATE_START + rotoShift;
+  const ROTO_TEMPLATE_END = ROTO_TEMPLATE_START + 1; // template has 2 rows (21-22)
+
+  // Insert extra rows if more than 2 rotocast items
+  const rotoTemplateCount = 2;
+  const rotoExtra = Math.max(0, rotoList.length - rotoTemplateCount);
+  for (let i = 0; i < rotoExtra; i++) {
+    ws.insertRow(ROTO_START + rotoTemplateCount + i, [], 'i+');
+  }
+
+  // Clear + fill rotocast rows
+  for (let i = 0; i < Math.max(rotoTemplateCount, rotoList.length); i++) {
+    const r = ROTO_START + i;
+    if (i === 0) ws.getCell(r, 1).value = '搪胶模具';
+    else ws.getCell(r, 1).value = null;
+    if (i < rotoList.length) {
+      const item = rotoList[i];
+      ws.getCell(r, 2).value = item.mold_no || '';
+      ws.getCell(r, 3).value = item.name || '';
+      ws.getCell(r, 4).value = parseInt(item.output_qty) || null;
+      ws.getCell(r, 5).value = parseInt(item.usage_pcs) || 1;
+      ws.getCell(r, 6).value = r2(item.unit_price_hkd);
+      // G col = formula =F*E for template row; write directly for extra rows
+      if (i < rotoTemplateCount) {
+        // keep template formula (auto-calc)
+      } else {
+        const total = (parseFloat(item.unit_price_hkd) || 0) * (parseInt(item.usage_pcs) || 1);
+        ws.getCell(r, 7).value = { formula: `F${r}*E${r}`, result: r2(total) || 0 };
+      }
+      ws.getCell(r, 8).value = item.remark || '';
+    } else {
+      // Clear empty template rows
+      for (let c = 1; c <= 8; c++) {
+        const cell = ws.getCell(r, c);
+        if (!cell.value?.formula) cell.value = null;
+      }
+    }
+  }
 }
 
 // ─── Main Export Function ─────────────────────────────────────────────────────
 
-async function exportVersion(versionId) {
-  const d = loadData(versionId);
-
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.readFile(TEMPLATE_PATH);
-
-  // ExcelJS may write NaN formula results as invalid XML — clear them
+function fixSharedFormulas(wb) {
   wb.eachSheet(ws => {
     ws.eachRow({ includeEmpty: false }, row => {
       row.eachCell({ includeEmpty: false }, cell => {
-        if (cell.value && typeof cell.value === 'object' && cell.value.formula !== undefined) {
-          const r = cell.value.result;
-          if (r === null || r === undefined || (typeof r === 'number' && isNaN(r))) {
-            cell.value = { formula: cell.value.formula };  // keep formula, drop bad result
+        if (cell.value && typeof cell.value === 'object') {
+          const v = cell.value;
+          if (v.sharedFormula) {
+            cell.value = { formula: v.sharedFormula, result: v.result };
+          } else if (v.formula !== undefined) {
+            const r = v.result;
+            if (r === null || r === undefined || (typeof r === 'number' && isNaN(r))) {
+              cell.value = { formula: v.formula };
+            }
           }
         }
       });
     });
   });
+}
 
-  const vqWs  = wb.getWorksheet('Vendor Quotation');
-  const bcdWs = wb.getWorksheet('Body Cost Breakdown');
+async function exportVersion(versionId) {
+  const d = loadData(versionId);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(TEMPLATE_PATH);
 
-  if (!vqWs)  throw new Error('Template missing "Vendor Quotation" sheet');
-  if (!bcdWs) throw new Error('Template missing "Body Cost Breakdown" sheet');
+  fixSharedFormulas(wb);
 
-  fillVQ(vqWs, d);
-  fillBCD(bcdWs, d);
+  {
+    const vqWs  = wb.getWorksheet('Vendor Quotation');
+    const bcdWs = wb.getWorksheet('Body Cost Breakdown');
+    if (!vqWs)  throw new Error('Template missing "Vendor Quotation" sheet');
+    if (!bcdWs) throw new Error('Template missing "Body Cost Breakdown" sheet');
+    fillVQ(vqWs, d);
+    fillBCD(bcdWs, d);
+  }
 
   return wb.xlsx.writeBuffer();
 }
